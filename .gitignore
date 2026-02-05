@@ -176,6 +176,8 @@ Thumbs.db
 pretrained/*
 
 .vscode/*
-_*
 experiments/*
 outputs/*
+
+# Temp files
+temp*
