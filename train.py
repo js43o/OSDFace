@@ -13,7 +13,7 @@ from diffusers import (
     StableDiffusionPipeline,
 )
 from accelerate import Accelerator
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
 
 from dataset_multipie import MultiPIEDataset
 from models.lq_embed import vqvae_encoder, TwoLayerConv1x1
@@ -63,13 +63,13 @@ def parse_args():
     parser.add_argument(
         "--save_image_steps",
         type=int,
-        default=500,
+        default=2000,
         help="Interval to save image samples",
     )
     parser.add_argument(
-        "--save_checkpoint_steps",
+        "--save_checkpoint_epochs",
         type=int,
-        default=1000,
+        default=1,
         help="Interval to save model checkpoints",
     )
     return parser.parse_args()
@@ -113,15 +113,26 @@ def main():
     img_encoder.to(device=device)
 
     # SD Pipeline with LoRA
-    pipe = StableDiffusionPipeline(vae, None, None, unet, noise_scheduler, None, None)
+    pipe = StableDiffusionPipeline(
+        vae=vae,
+        text_encoder=None,
+        tokenizer=None,
+        unet=unet,
+        scheduler=noise_scheduler,
+        safety_checker=None,
+        feature_extractor=None,
+    )
     pipe.load_lora_weights(args.ckpt_path)
-    trainable_unet = pipe.unet
-    trainable_unet.train()
-    trainable_unet.requires_grad_(False)
+    pipe.unet.train()
+    pipe.unet.requires_grad_(False)
 
-    for n, p in trainable_unet.named_parameters():
-        if "lora" in n:
-            p.requires_grad = True
+    unet_lora_state_dict = {}
+
+    for name, param in pipe.unet.named_parameters():
+        if "lora" in name:
+            name_new = name.replace(".default_0", "")
+            param.requires_grad = True
+            unet_lora_state_dict[name_new] = param
 
     # Discriminator from SDXL
     discriminator = SDXLPartialDiscriminator(
@@ -163,7 +174,7 @@ def main():
 
     # Optimizer & Loss
     optimizer_g = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, trainable_unet.parameters()), lr=1e-4
+        filter(lambda p: p.requires_grad, pipe.unet.parameters()), lr=1e-4
     )
     optimizer_d = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, discriminator.parameters()), lr=1e-4
@@ -185,14 +196,14 @@ def main():
 
     # Accelerator Prepare
     (
-        trainable_unet,
+        pipe.unet,
         discriminator,
         embedding_change,
         optimizer_g,
         optimizer_d,
         dataloader,
     ) = accelerator.prepare(
-        trainable_unet,
+        pipe.unet,
         discriminator,
         embedding_change,
         optimizer_g,
@@ -244,7 +255,7 @@ def main():
             )
 
             # UNet Inference
-            model_pred = trainable_unet(
+            model_pred = pipe.unet(
                 lq_latent, timesteps_g, encoder_hidden_states=prompt_embeds
             ).sample
 
@@ -376,48 +387,42 @@ def main():
                         )
                         save_image(make_grid(grid, nrow=n_save, padding=2), save_path)
                         print(f"📸 Saved sample images to {save_path}")
+                        break
 
-            # Model Checkpoints Saving
-            if idx % args.save_checkpoint_steps == 0 and idx > 0:
-                accelerator.wait_for_everyone()
+        # Model Checkpoints Saving
+        if True:
+            accelerator.wait_for_everyone()
 
-                if accelerator.is_main_process:
-                    ckpt_dir = os.path.join(
-                        args.output_dir,
-                        "checkpoints",
-                        f"epoch_{epoch:02d}__step_{idx:06d}",
-                    )
-                    os.makedirs(ckpt_dir, exist_ok=True)
+            if accelerator.is_main_process:
+                ckpt_dir = os.path.join(
+                    args.output_dir, "checkpoints", f"epoch_{epoch:02d}"
+                )
+                os.makedirs(ckpt_dir, exist_ok=True)
 
-                    # Generator (UNet LoRA)
-                    unwrapped_unet = accelerator.unwrap_model(trainable_unet)
-                    unet_lora_state_dict = {
-                        k: v
-                        for k, v in unwrapped_unet.state_dict().items()
-                        if "lora" in k
-                    }
-                    torch.save(
-                        unet_lora_state_dict,
-                        os.path.join(ckpt_dir, "unet_lora.pth"),
-                    )
+                # Generator (UNet LoRA)
+                pipe.save_lora_weights(
+                    save_directory=ckpt_dir,
+                    unet_lora_layers=unet_lora_state_dict,
+                    weight_name="unet_lora.safetensors",
+                )
 
-                    # Embedding Change Module
-                    unwrapped_emb_change = accelerator.unwrap_model(embedding_change)
-                    torch.save(
-                        unwrapped_emb_change.state_dict(),
-                        os.path.join(ckpt_dir, "embedding_change.pth"),
-                    )
+                # Embedding Change Module
+                unwrapped_emb_change = accelerator.unwrap_model(embedding_change)
+                torch.save(
+                    unwrapped_emb_change.state_dict(),
+                    os.path.join(ckpt_dir, "embedding_change.pth"),
+                )
 
-                    # Discriminator (PEFT 모델이므로 save_pretrained 지원)
-                    unwrapped_discriminator = accelerator.unwrap_model(discriminator)
-                    # PEFT 모델은 save_pretrained로 LoRA config와 weight를 같이 저장
-                    unwrapped_discriminator.save_pretrained(
-                        os.path.join(ckpt_dir, "discriminator_lora")
-                    )
+                # Discriminator (PEFT 모델이므로 save_pretrained 지원)
+                unwrapped_discriminator = accelerator.unwrap_model(discriminator)
+                # PEFT 모델은 save_pretrained로 LoRA config와 weight를 같이 저장
+                unwrapped_discriminator.save_pretrained(
+                    os.path.join(ckpt_dir, "discriminator_lora")
+                )
 
-                    print(f"💾 Saved checkpoints to {ckpt_dir}")
+                print(f"💾 Saved checkpoints to {ckpt_dir}")
 
-                accelerator.wait_for_everyone()
+            accelerator.wait_for_everyone()
 
     print("✅ Done!")
     accelerator.end_training()

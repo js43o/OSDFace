@@ -181,3 +181,7 @@ outputs/*
 
 # Temp files
 temp*
+
+*.png
+*.jpg
+*.jpeg

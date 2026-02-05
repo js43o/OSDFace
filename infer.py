@@ -1,9 +1,5 @@
 import copy
 import os
-import sys
-
-sys.path.append(os.getcwd())
-
 import glob
 import argparse
 import copy
@@ -28,12 +24,6 @@ from diffusers import (
 from utils.vaehook import perfcount
 from utils.others import get_x0_from_noise
 from models.lq_embed import vqvae_encoder, TwoLayerConv1x1
-
-tensor_transforms = transforms.Compose(
-    [
-        transforms.ToTensor(),
-    ]
-)
 
 
 class OSDFace_test(nn.Module):
@@ -82,30 +72,16 @@ class OSDFace_test(nn.Module):
             self.embedding_change.to(self.device, dtype=self.weight_dtype)
         if not self.args.merge_lora:
             pipe = StableDiffusionPipeline(
-                self.vae, None, None, self.unet, self.noise_scheduler, None, None
+                vae=self.vae,
+                text_encoder=None,
+                tokenizer=None,
+                unet=self.unet,
+                scheduler=self.noise_scheduler,
+                safety_checker=None,
+                feature_extractor=None,
             )
-            """
-            pipe.load_lora_weights(ckpt_path)
+            pipe.load_lora_weights(ckpt_path, weight_name="unet_lora.safetensors")
             self.unet = pipe.unet
-            """
-            pipe.load_lora_weights("pretrained/pytorch_lora_weights.safetensors")
-
-            # 2. 훈련된 .pth 파일을 직접 로드합니다.
-            trained_state_dict = torch.load(
-                os.path.join(ckpt_path, "unet_lora.pth"), weights_only=False
-            )
-
-            # 3. 키 불일치를 해결하며 강제로 덮어씌웁니다.
-            # 훈련 시 unwrapped_unet에서 바로 저장했으므로, pipe.unet에 바로 넣으면 키가 맞습니다.
-            missing, unexpected = pipe.unet.load_state_dict(
-                trained_state_dict, strict=False
-            )
-
-            # 확인용 (LoRA 웨이트들만 업데이트 되었는지)
-            print(
-                f"Missing keys: {len(missing)}"
-            )  # 원래 UNet 웨이트들이 missing으로 뜸 (정상)
-            print(f"Unexpected keys: {len(unexpected)}")  # 0이어야 함
 
     @perfcount
     @torch.no_grad()
@@ -147,6 +123,7 @@ class OSDFace_test(nn.Module):
         return output_image.clamp(0.0, 1.0)
 
 
+"""
 def merge_Unet(args):
     unet = UNet2DConditionModel.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="unet"
@@ -237,6 +214,7 @@ def merge_Unet(args):
     print("Merge Done!")
     unet.load_state_dict(state_dict_unet)
     return unet
+"""
 
 
 def main_worker(Unet, rank, gpu_id, image_names, weight_dtype, args):
@@ -331,7 +309,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--seed", type=int, default=114, help="Random seed to be used")
     parser.add_argument("--process_size", type=int, default=512)
-    parser.add_argument("--ckpt_path", type=str, default=None)
+    parser.add_argument("--ckpt_path", type=str, default=None, required=True)
     parser.add_argument(
         "--mixed_precision", type=str, choices=["fp16", "fp32"], default="fp32"
     )
@@ -347,10 +325,10 @@ if __name__ == "__main__":
         help="use cat_prompt_embedding to exchange embedding change",
     )
     parser.add_argument(
-        "--use_pos_embedding", action="store_true", help="use 2D pos embedding"
+        "--use_att_pool", action="store_true", help="use attention pool layer"
     )
     parser.add_argument(
-        "--use_att_pool", action="store_true", help="use attention pool layer"
+        "--use_pos_embedding", action="store_true", help="use 2D pos embedding"
     )
     parser.add_argument("--merge_lora", action="store_true", help="merge LoRA weights")
     parser.add_argument("--lora_rank", type=int, default=16)
@@ -367,7 +345,8 @@ if __name__ == "__main__":
         torch.cuda.manual_seed_all(seed)
     Unet = None
     if args.merge_lora:
-        Unet = merge_Unet(args)
+        # Unet = merge_Unet(args)
+        pass
     os.makedirs(args.output_dir, exist_ok=True)
     print(f'There are {len(glob.glob(f"{args.input_image}/*"))} images to process.')
 
