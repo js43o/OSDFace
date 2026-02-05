@@ -1,74 +1,97 @@
 from matplotlib.backends.backend_agg import FigureCanvasAgg
-import torchvision.transforms as transforms
 from PIL import Image, ImageDraw, ImageFont
 from transformers import PretrainedConfig
 from torch.utils.data import Dataset
-import matplotlib.pyplot as plt 
+from torch.nn.functional import interpolate
+from torchvision.transforms.functional import rgb_to_grayscale, hflip
+import torchvision.transforms as transforms
+import matplotlib.pyplot as plt
 import imageio.v2 as imageio
-from torch import nn 
-import numpy as np 
-import textwrap 
-import pickle 
-import torch 
-import copy 
-import os 
+from torch import nn
+import numpy as np
+import textwrap
+import pickle
+import torch
+import copy
+import os
 
-def prepare_images_for_saving(images_tensor, resolution, grid_size=4, range_type="neg1pos1"):
+
+def prepare_images_for_saving(
+    images_tensor, resolution, grid_size=4, range_type="neg1pos1"
+):
     if range_type != "uint8":
         images_tensor = (images_tensor * 0.5 + 0.5).clamp(0, 1) * 255
 
-    images = images_tensor[:grid_size*grid_size].permute(0, 2, 3, 1).detach().cpu().numpy().astype("uint8")
+    images = (
+        images_tensor[: grid_size * grid_size]
+        .permute(0, 2, 3, 1)
+        .detach()
+        .cpu()
+        .numpy()
+        .astype("uint8")
+    )
     grid = images.reshape(grid_size, grid_size, resolution, resolution, 3)
-    grid = np.swapaxes(grid, 1, 2).reshape(grid_size*resolution, grid_size*resolution, 3)
+    grid = np.swapaxes(grid, 1, 2).reshape(
+        grid_size * resolution, grid_size * resolution, 3
+    )
     return grid
 
+
 def prepare_debug_output(tensor, resolution):
-    # N x T x 3 x H x W 
+    # N x T x 3 x H x W
     N, T = tensor.shape[:2]
     tensor = tensor.transpose(0, 1)
-    tensor = ((tensor * 0.5 + 0.5).clamp(0, 1) * 255).permute(0, 1, 3, 4, 2).detach().cpu().numpy().astype("uint8")      
-    tensor = np.swapaxes(tensor, 1, 2).reshape(T*resolution, N*resolution, 3)
-    return tensor 
+    tensor = (
+        ((tensor * 0.5 + 0.5).clamp(0, 1) * 255)
+        .permute(0, 1, 3, 4, 2)
+        .detach()
+        .cpu()
+        .numpy()
+        .astype("uint8")
+    )
+    tensor = np.swapaxes(tensor, 1, 2).reshape(T * resolution, N * resolution, 3)
+    return tensor
+
 
 def draw_valued_array(data, output_dir, grid_size=4):
-    fig = plt.figure(figsize=(20,20))
+    fig = plt.figure(figsize=(20, 20))
 
-    data = data[:grid_size*grid_size].reshape(grid_size, grid_size)
-    cax = plt.matshow(data, cmap='viridis')  # Change cmap to your desired color map
+    data = data[: grid_size * grid_size].reshape(grid_size, grid_size)
+    cax = plt.matshow(data, cmap="viridis")  # Change cmap to your desired color map
     plt.colorbar(cax)
 
     for i in range(grid_size):
         for j in range(grid_size):
-            plt.text(j, i, f'{data[i, j]:.3f}', ha='center', va='center', color='black')
+            plt.text(j, i, f"{data[i, j]:.3f}", ha="center", va="center", color="black")
 
     plt.savefig(os.path.join(output_dir, "cache.jpg"))
-    plt.close('all')
+    plt.close("all")
 
-    # read the image 
+    # read the image
     image = imageio.imread(os.path.join(output_dir, "cache.jpg"))
     return image
 
-def draw_probability_histogram(data):
-    fig = plt.figure(figsize=(5,5))
 
-    plt.hist(data, color='blue', edgecolor='black')
-    plt.title('Histogram of Realism Prediction')
-    plt.xlabel('Value')
-    plt.ylabel('Frequency')
+def draw_probability_histogram(data):
+    fig = plt.figure(figsize=(5, 5))
+
+    plt.hist(data, color="blue", edgecolor="black")
+    plt.title("Histogram of Realism Prediction")
+    plt.xlabel("Value")
+    plt.ylabel("Frequency")
     plt.xlim(0, 1)
 
     canvas = FigureCanvasAgg(fig)
     canvas.draw()
 
     # Get the canvas as a PIL image
-    image = Image.frombytes(
-        "RGB", canvas.get_width_height(), canvas.tostring_rgb()
-    )
-    plt.close('all')
+    image = Image.frombytes("RGB", canvas.get_width_height(), canvas.tostring_rgb())
+    plt.close("all")
     return image
 
+
 def draw_gradient_norm(data, pred_realism, num_bin=10, bin_size=0.1):
-    mean_list = [] 
+    mean_list = []
     for bin_idx in range(num_bin):
         start = bin_idx * bin_size
         end = (bin_idx + 1) * bin_size
@@ -78,12 +101,12 @@ def draw_gradient_norm(data, pred_realism, num_bin=10, bin_size=0.1):
             mean_list.append(0)
         else:
             mean_list.append(data_bin.mean())
-        
-    fig = plt.figure(figsize=(5,5))
+
+    fig = plt.figure(figsize=(5, 5))
     plt.plot(np.arange(num_bin) * bin_size, mean_list)
-    plt.title('Gradient Norm')
-    plt.xlabel('Predicted Realism')
-    plt.ylabel('Mean Grad Norm')
+    plt.title("Gradient Norm")
+    plt.xlabel("Predicted Realism")
+    plt.ylabel("Mean Grad Norm")
 
     plt.xlim(0, 1)
 
@@ -91,21 +114,20 @@ def draw_gradient_norm(data, pred_realism, num_bin=10, bin_size=0.1):
     canvas.draw()
 
     # Get the canvas as a PIL image
-    image = Image.frombytes(
-        "RGB", canvas.get_width_height(), canvas.tostring_rgb()
-    )
-    plt.close('all')
+    image = Image.frombytes("RGB", canvas.get_width_height(), canvas.tostring_rgb())
+    plt.close("all")
     return image
 
+
 def draw_array(indices, values, min_val=None, max_val=None):
-    fig = plt.figure(figsize=(5,5))
+    fig = plt.figure(figsize=(5, 5))
     plt.plot(indices, values)
 
-    if max_val is None: 
-        max_val = max(values[values!= 1.0].max() * 1.1, 0.05)
-    
-    if min_val is None: 
-        min_val = 0 
+    if max_val is None:
+        max_val = max(values[values != 1.0].max() * 1.1, 0.05)
+
+    if min_val is None:
+        min_val = 0
 
     plt.ylim(min_val, max_val)
 
@@ -113,16 +135,16 @@ def draw_array(indices, values, min_val=None, max_val=None):
     canvas.draw()
 
     # Get the canvas as a PIL image
-    image = Image.frombytes(
-        "RGB", canvas.get_width_height(), canvas.tostring_rgb()
-    )
-    plt.close('all')
+    image = Image.frombytes("RGB", canvas.get_width_height(), canvas.tostring_rgb())
+    plt.close("all")
     return image
+
 
 def cycle(dl):
     while True:
         for data in dl:
             yield data
+
 
 def update_ema(target_params, source_params, rate=0.999):
     """
@@ -135,6 +157,7 @@ def update_ema(target_params, source_params, rate=0.999):
     """
     for targ, src in zip(target_params, source_params):
         targ.detach().mul_(rate).add_(src, alpha=1 - rate)
+
 
 class EMA(nn.Module):
     def __init__(self, model, decay=0.999):
@@ -149,51 +172,58 @@ class EMA(nn.Module):
         # update the parameters
         update_ema(self.ema_model.parameters(), model.parameters(), self.decay)
 
-        # update the buffers with certain exception 
-        for (buffer_ema_name, buffer_ema), (buffer_name, buffer) in zip(self.ema_model.named_buffers(), model.named_buffers()):
+        # update the buffers with certain exception
+        for (buffer_ema_name, buffer_ema), (buffer_name, buffer) in zip(
+            self.ema_model.named_buffers(), model.named_buffers()
+        ):
             if "num_batches_tracked" in buffer_ema_name:
                 buffer_ema.copy_(buffer)
             else:
                 update_ema([buffer_ema], [buffer], self.decay)
 
+
 def retrieve_row_from_lmdb(lmdb_env, array_name, dtype, shape, row_index):
     """
     Retrieve a specific row from a specific array in the LMDB.
     """
-    data_key = f'{array_name}_{row_index}_data'.encode()
+    data_key = f"{array_name}_{row_index}_data".encode()
 
     with lmdb_env.begin() as txn:
         row_bytes = txn.get(data_key)
 
     array = np.frombuffer(row_bytes, dtype=dtype)
-    
+
     if len(shape) > 0:
         array = array.reshape(shape)
-    return array 
+    return array
+
 
 def get_array_shape_from_lmdb(lmdb_env, array_name):
     with lmdb_env.begin() as txn:
         image_shape = txn.get(f"{array_name}_shape".encode()).decode()
         image_shape = tuple(map(int, image_shape.split()))
 
-    return image_shape 
+    return image_shape
+
 
 def create_image_grid(args, images_array, captions=None):
     # Set the dimensions of each individual image
     thumbnail_width = args.image_resolution
-    thumbnail_height = args.image_resolution 
+    thumbnail_height = args.image_resolution
 
     # Spacing and margins
     caption_height = 30
     spacing = 15
-    images_per_row = int(len(images_array) ** (1/2))  
+    images_per_row = int(len(images_array) ** (1 / 2))
 
     # Calculate grid dimensions
     total_width = (thumbnail_width + spacing) * images_per_row
-    total_height = (thumbnail_height + caption_height + spacing) * (len(images_array) // images_per_row)
+    total_height = (thumbnail_height + caption_height + spacing) * (
+        len(images_array) // images_per_row
+    )
 
     # Create the big grid image with white background
-    grid_img = Image.new('RGB', (total_width, total_height), (255, 255, 255))
+    grid_img = Image.new("RGB", (total_width, total_height), (255, 255, 255))
     draw = ImageDraw.Draw(grid_img)
 
     # Load a font for the captions
@@ -216,9 +246,15 @@ def create_image_grid(args, images_array, captions=None):
 
         wrapped_caption = textwrap.fill(str(caption), width=80)
 
-        draw.text((x, y + thumbnail_height), f"{i:05d}_{wrapped_caption}", font=font, fill=(0, 0, 0))
+        draw.text(
+            (x, y + thumbnail_height),
+            f"{i:05d}_{wrapped_caption}",
+            font=font,
+            fill=(0, 0, 0),
+        )
 
-    return grid_img 
+    return grid_img
+
 
 class SDTextDataset(Dataset):
     def __init__(self, anno_path, tokenizer_one, is_sdxl=False, tokenizer_two=None):
@@ -228,15 +264,15 @@ class SDTextDataset(Dataset):
                 for line in f:
                     line = line.strip()
                     if line == "":
-                        continue 
+                        continue
                     else:
                         self.all_prompts.append(line)
         else:
             self.all_prompts = pickle.load(open(anno_path, "rb"))
-    
+
         self.all_indices = list(range(len(self.all_prompts)))
 
-        self.is_sdxl = is_sdxl # sdxl uses two tokenizers
+        self.is_sdxl = is_sdxl  # sdxl uses two tokenizers
         self.tokenizer_one = tokenizer_one
         self.tokenizer_two = tokenizer_two
 
@@ -250,7 +286,6 @@ class SDTextDataset(Dataset):
         if prompt == None:
             prompt = ""
 
-
         text_input_ids_one = self.tokenizer_one(
             [prompt],
             padding="max_length",
@@ -260,9 +295,9 @@ class SDTextDataset(Dataset):
         ).input_ids
 
         output_dict = {
-            'index': self.all_indices[idx],
-            'key': prompt,
-            'text_input_ids_one': text_input_ids_one,
+            "index": self.all_indices[idx],
+            "key": prompt,
+            "text_input_ids_one": text_input_ids_one,
         }
 
         if self.is_sdxl:
@@ -273,23 +308,29 @@ class SDTextDataset(Dataset):
                 truncation=True,
                 return_tensors="pt",
             ).input_ids
-            output_dict['text_input_ids_two'] = text_input_ids_two
+            output_dict["text_input_ids_two"] = text_input_ids_two
 
-        return output_dict 
-    
+        return output_dict
+
+
 def get_x0_from_noise(sample, model_output, alphas_cumprod, timestep):
     alpha_prod_t = alphas_cumprod[timestep].reshape(-1, 1, 1, 1)
     beta_prod_t = 1 - alpha_prod_t
 
-    pred_original_sample = (sample - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
+    pred_original_sample = (
+        sample - beta_prod_t ** (0.5) * model_output
+    ) / alpha_prod_t ** (0.5)
+
     return pred_original_sample
+
 
 def get_prev_sample_from_noise(sample, model_output, alphas, betas, timestep):
     alpha_t = alphas[timestep]
     beta_t = betas[timestep]
     pred_latents = (sample - beta_t * model_output) / alpha_t
-    
+
     return pred_latents
+
 
 class NoOpContext:
     def __enter__(self):
@@ -298,10 +339,12 @@ class NoOpContext:
     def __exit__(self, *args):
         pass
 
+
 class DummyNetwork(nn.Module):
     def __init__(self):
         super().__init__()
         self.fc = nn.Linear(32, 1)
+
 
 def import_model_class_from_model_name_or_path(
     pretrained_model_name_or_path: str, revision: str, subfolder: str = "text_encoder"
@@ -322,12 +365,15 @@ def import_model_class_from_model_name_or_path(
     else:
         raise ValueError(f"{model_class} is not supported.")
 
+
 def extract_text_embeddings(batch, accelerator, text_encoder_one, text_encoder_two):
-    text_input_ids_one = batch['text_input_ids_one'].to(accelerator.device).squeeze(1)
-    text_input_ids_two = batch['text_input_ids_two'].to(accelerator.device).squeeze(1)
+    text_input_ids_one = batch["text_input_ids_one"].to(accelerator.device).squeeze(1)
+    text_input_ids_two = batch["text_input_ids_two"].to(accelerator.device).squeeze(1)
     prompt_embeds_list = []
 
-    for text_input_ids, text_encoder in zip([text_input_ids_one, text_input_ids_two], [text_encoder_one, text_encoder_two]):
+    for text_input_ids, text_encoder in zip(
+        [text_input_ids_one, text_input_ids_two], [text_encoder_one, text_encoder_two]
+    ):
         prompt_embeds = text_encoder(
             text_input_ids.to(text_encoder.device),
             output_hidden_states=True,
@@ -342,9 +388,10 @@ def extract_text_embeddings(batch, accelerator, text_encoder_one, text_encoder_t
 
     prompt_embeds = torch.concat(prompt_embeds_list, dim=-1)
     # use the second text encoder's pooled prompt embeds  (the first value is overwrited)
-    pooled_prompt_embeds = pooled_prompt_embeds.view(len(text_input_ids_one), -1) 
+    pooled_prompt_embeds = pooled_prompt_embeds.view(len(text_input_ids_one), -1)
 
     return prompt_embeds, pooled_prompt_embeds
+
 
 class EdgeDetectionModel(nn.Module):
     def __init__(self):
@@ -352,14 +399,14 @@ class EdgeDetectionModel(nn.Module):
         # Sobel filters for edge detection
         self.sobel_x = nn.Conv2d(1, 1, kernel_size=3, padding=1, bias=False)
         self.sobel_y = nn.Conv2d(1, 1, kernel_size=3, padding=1, bias=False)
-        
-        sobel_x_kernel = torch.tensor([[-1., 0., 1.],
-                                       [-2., 0., 2.],
-                                       [-1., 0., 1.]])
-        sobel_y_kernel = torch.tensor([[-1., -2., -1.],
-                                       [ 0.,  0.,  0.],
-                                       [ 1.,  2.,  1.]])
-        
+
+        sobel_x_kernel = torch.tensor(
+            [[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]]
+        )
+        sobel_y_kernel = torch.tensor(
+            [[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]]
+        )
+
         self.sobel_x.weight = nn.Parameter(sobel_x_kernel.view(1, 1, 3, 3))
         self.sobel_y.weight = nn.Parameter(sobel_y_kernel.view(1, 1, 3, 3))
         self.sobel_x.weight.requires_grad = False
@@ -369,12 +416,33 @@ class EdgeDetectionModel(nn.Module):
         # Convert to grayscale if needed
         if x.shape[1] == 3:
             x = transforms.Grayscale()(x)
-        
+
         # Apply Sobel filters
         edge_x = self.sobel_x(x)
         edge_y = self.sobel_y(x)
-        
+
         # Calculate gradient magnitude (edge detection result)
-        edges = torch.sqrt(edge_x ** 2 + edge_y ** 2 + 1e-6)
-        
+        edges = torch.sqrt(edge_x**2 + edge_y**2 + 1e-6)
+
         return edges
+
+
+# ArcFace 입력 이미지 변환 메서드
+# (1, 3, H, W), RGB, [0, 1] -> (2, 1, H, W), Grayscale, [-1, 1]
+def process_arcface_input(input_tensor):
+    input_tensor = interpolate(
+        input_tensor, size=(128, 128), mode="bilinear", align_corners=False
+    )
+    gray = rgb_to_grayscale(input_tensor, num_output_channels=1)
+    flipped = hflip(gray)
+    output = torch.cat([gray, flipped], dim=0)
+
+    return output
+
+
+def process_visual_image(img_tensor):
+    img = img_tensor.detach().cpu()
+    img = torch.clamp(img, -1, 1)
+    img = (img + 1) / 2.0
+
+    return img

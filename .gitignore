@@ -173,4 +173,9 @@ Thumbs.db
 .Spotlight-V100
 .Trashes
 
-pretrained
+pretrained/*
+
+.vscode/*
+_*
+experiments/*
+outputs/*
