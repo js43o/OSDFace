@@ -180,7 +180,9 @@ experiments/*
 outputs/*
 
 # Temp files
-temp*
+_*.py
+_*.txt
+!__init__.py
 
 *.png
 *.jpg

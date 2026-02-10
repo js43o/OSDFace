@@ -31,7 +31,7 @@ def parse_args():
         default="stabilityai/stable-diffusion-2-1-base",
     )
     parser.add_argument("--seed", type=int, default=114)
-    parser.add_argument("--max_epoch", type=int, default=40)
+    parser.add_argument("--max_epoch", type=int, default=16)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument(
         "--lambda_adv", type=float, default=1e-2, help="Adversarial loss weight"
@@ -57,7 +57,7 @@ def parse_args():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="experiments",
+        default="experiments/05",
         help="Root directory for saving results",
     )
     parser.add_argument(
@@ -238,8 +238,13 @@ def main():
                 )
 
             # Prompt Embedding
-            prompt_embeds = img_encoder(lq).reshape(args.batch_size, 77, -1)
-            prompt_embeds = embedding_change(prompt_embeds)
+            prompt_embeds = []
+            for lq_batch in lq:
+                prompt_embed = img_encoder(lq_batch.unsqueeze(0)).reshape(1, 77, -1)
+                prompt_embed = embedding_change(prompt_embed)
+                prompt_embeds.append(prompt_embed)
+
+            prompt_embeds = torch.cat(prompt_embeds)
 
             # ---------------- Generator Update ----------------
             optimizer_g.zero_grad()
@@ -359,15 +364,16 @@ def main():
             accelerator.backward(loss_D)
             optimizer_d.step()
 
-            if accelerator.is_main_process:
-                # Logs Printing
-                if idx % 100 == 0:
+            # Logs Printing
+            if idx % 100 == 0:
+                if accelerator.is_main_process:
                     print(
                         f"Step {idx}: L_pix = {loss_pixel.item():.4f}, L_G = {loss_G_adv.item():.4f}, Loss D = {loss_D.item():.4f}"
                     )
 
-                # Validation Images Saving
-                if idx % args.save_image_steps == 0:
+            # Validation Images Saving
+            if idx % args.save_image_steps == 0:
+                if accelerator.is_main_process:
                     save_dir = os.path.join(args.output_dir, "samples")
                     os.makedirs(save_dir, exist_ok=True)
 
@@ -385,14 +391,11 @@ def main():
                         save_path = os.path.join(
                             save_dir, f"epoch_{epoch:02d}__step_{idx:06d}.png"
                         )
-                        save_image(make_grid(grid, nrow=n_save, padding=2), save_path)
+                        save_image(make_grid(grid, nrow=1, padding=2), save_path)
                         print(f"📸 Saved sample images to {save_path}")
-                        break
 
         # Model Checkpoints Saving
-        if True:
-            accelerator.wait_for_everyone()
-
+        if epoch % args.save_checkpoint_epochs == 0:
             if accelerator.is_main_process:
                 ckpt_dir = os.path.join(
                     args.output_dir, "checkpoints", f"epoch_{epoch:02d}"
@@ -421,8 +424,6 @@ def main():
                 )
 
                 print(f"💾 Saved checkpoints to {ckpt_dir}")
-
-            accelerator.wait_for_everyone()
 
     print("✅ Done!")
     accelerator.end_training()

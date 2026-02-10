@@ -230,7 +230,11 @@ def main_worker(Unet, rank, gpu_id, image_names, weight_dtype, args):
             )
             continue
 
-        input_image = Image.open(image_name).convert("RGB")
+        input_image = (
+            Image.open(image_name)
+            .convert("RGB")
+            .resize((512, 512), resample=Image.Resampling.BICUBIC)
+        )
         with torch.no_grad():
             lq = (
                 F.to_tensor(input_image).unsqueeze(0).to(gpu_id, dtype=weight_dtype) * 2
