@@ -28,7 +28,7 @@ def parse_args():
     parser.add_argument(
         "--pretrained_model_name_or_path",
         type=str,
-        default="stabilityai/stable-diffusion-2-1-base",
+        default="Manojb/stable-diffusion-2-1-base",
     )
     parser.add_argument("--seed", type=int, default=114)
     parser.add_argument("--max_epoch", type=int, default=16)
@@ -41,7 +41,9 @@ def parse_args():
     )
     parser.add_argument("--ckpt_path", type=str, default="pretrained")
     parser.add_argument(
-        "--img_encoder_weight", type=str, default="pretrained/associate_2.ckpt"
+        "--img_encoder_weight",
+        type=str,
+        default="pretrained/ddvqgan_encoder.ckpt",  # default="pretrained/associate_2.ckpt"
     )
     parser.add_argument(
         "--cat_prompt_embedding",
@@ -57,7 +59,7 @@ def parse_args():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="experiments/05",
+        default="experiments/06",
         help="Root directory for saving results",
     )
     parser.add_argument(
@@ -186,7 +188,7 @@ def main():
 
     # DataLoader
     dataset = MultiPIEDataset(
-        "/vcl4/Jiseung/datasets/multipie_crop_patch_v2",
+        "/4tb/datasets/multipie_crop_patch_v2",
         model_type="uni",
         use="train",
         res=512,

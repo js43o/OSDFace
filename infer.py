@@ -303,6 +303,7 @@ if __name__ == "__main__":
         "-o",
         type=str,
         required=True,
+        default="outputs",
         help="the directory to save the output",
     )
     parser.add_argument(
@@ -313,7 +314,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--seed", type=int, default=114, help="Random seed to be used")
     parser.add_argument("--process_size", type=int, default=512)
-    parser.add_argument("--ckpt_path", type=str, default=None, required=True)
+    parser.add_argument("--ckpt_path", type=str, required=True)
     parser.add_argument(
         "--mixed_precision", type=str, choices=["fp16", "fp32"], default="fp32"
     )
