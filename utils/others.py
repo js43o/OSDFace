@@ -428,14 +428,12 @@ class EdgeDetectionModel(nn.Module):
 
 
 # ArcFace 입력 이미지 변환 메서드
-# (1, 3, H, W), RGB, [0, 1] -> (2, 1, H, W), Grayscale, [-1, 1]
+# RGB / [0, 1] -> Grayscale / [-1, 1]
 def process_arcface_input(input_tensor):
     input_tensor = interpolate(
         input_tensor, size=(128, 128), mode="bilinear", align_corners=False
     )
-    gray = rgb_to_grayscale(input_tensor, num_output_channels=1)
-    flipped = hflip(gray)
-    output = torch.cat([gray, flipped], dim=0)
+    output = rgb_to_grayscale(input_tensor, num_output_channels=1)
 
     return output
 

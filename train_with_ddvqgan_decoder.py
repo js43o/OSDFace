@@ -13,14 +13,14 @@ from diffusers import (
     StableDiffusionPipeline,
 )
 from accelerate import Accelerator
-from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
+from peft import LoraConfig, get_peft_model
 
 from dataset_multipie import MultiPIEDataset
-from models.lq_embed import vqvae_encoder, TwoLayerConv1x1
+from models.lq_embed import TwoLayerConv1x1, vqvae_encoder, DualDecoderVQGAN
+from models.arcface.models import resnet_face18
 from discriminator import SDXLPartialDiscriminator
 from utils.others import get_x0_from_noise, process_arcface_input, process_visual_image
 from edge_aware_dists_demo import EdgeAwareDISTSLoss
-from models.arcface.models import resnet_face18
 
 
 def parse_args():
@@ -32,7 +32,7 @@ def parse_args():
     )
     parser.add_argument("--seed", type=int, default=114)
     parser.add_argument("--max_epoch", type=int, default=16)
-    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument(
         "--lambda_adv", type=float, default=1e-2, help="Adversarial loss weight"
     )
@@ -43,7 +43,12 @@ def parse_args():
     parser.add_argument(
         "--img_encoder_weight",
         type=str,
-        default="pretrained/ddvqgan_encoder.ckpt",  # default="pretrained/associate_2.ckpt"
+        default="pretrained/ddvqgan_encoder.ckpt",
+    )
+    parser.add_argument(
+        "--ddvqgan_ckpt_path",
+        type=str,
+        default="pretrained/model.safetensors",
     )
     parser.add_argument(
         "--cat_prompt_embedding",
@@ -59,7 +64,7 @@ def parse_args():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="experiments/06",
+        default="experiments/07",
         help="Root directory for saving results",
     )
     parser.add_argument(
@@ -94,15 +99,15 @@ def main():
     vae = AutoencoderKL.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="vae"
     )
-    vae.eval()
     vae.requires_grad_(False)
 
     # UNet from Stable Diffusion
     unet = UNet2DConditionModel.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="unet"
     )
+
     # Custom Modules
-    embedding_change = TwoLayerConv1x1(512, 1024)
+    embedding_change = TwoLayerConv1x1(512, 1024).to(device=device)
     embedding_change.load_state_dict(
         torch.load(
             os.path.join(args.ckpt_path, "embedding_change_weights.pth"),
@@ -111,8 +116,13 @@ def main():
     )
 
     # LQ Image Encoder
-    img_encoder = vqvae_encoder(args)
-    img_encoder.to(device=device)
+    ddvqgan = DualDecoderVQGAN(args.ddvqgan_ckpt_path).to(device=device)
+    ddvqgan.requires_grad_(False)
+    ddvqgan.eval()
+
+    img_encoder = vqvae_encoder(args).to(device=device)
+    img_encoder.requires_grad_(False)
+    img_encoder.eval()
 
     # SD Pipeline with LoRA
     pipe = StableDiffusionPipeline(
@@ -136,21 +146,19 @@ def main():
             param.requires_grad = True
             unet_lora_state_dict[name_new] = param
 
+    # Identity Model
+    id_model = resnet_face18(use_se=False).to(device=device)
+    id_model_ckpt = torch.load(
+        "models/arcface/weights/resnet18_110_wo_dist.pth", weights_only=False
+    )
+    id_model.load_state_dict(id_model_ckpt)
+    id_model.requires_grad_(False)
+    id_model.eval()
+
     # Discriminator from SDXL
     discriminator = SDXLPartialDiscriminator(
         sdxl_unet_id="stabilityai/stable-diffusion-xl-base-1.0", device=device
     )
-
-    # Identity Model
-    id_model = resnet_face18(use_se=False)
-    id_model.load_state_dict(
-        torch.load(
-            "models/arcface/weights/resnet18_110_wo_dist.pth", weights_only=False
-        )
-    )
-    id_model.to(device=device)
-    id_model.eval()
-
     lora_config_D = LoraConfig(
         r=16,
         lora_alpha=16,
@@ -171,8 +179,10 @@ def main():
         bias="none",
     )
     discriminator = get_peft_model(discriminator, lora_config_D)
-    discriminator.requires_grad_(False)
-    discriminator.mlp_head.requires_grad_(True)
+
+    for name, param in discriminator.named_parameters():
+        if "lora_" not in name and "mlp_head" not in name:
+            param.requires_grad = False  # only LoRA and MLP is trainable
 
     # Optimizer & Loss
     optimizer_g = torch.optim.AdamW(
@@ -188,7 +198,7 @@ def main():
 
     # DataLoader
     dataset = MultiPIEDataset(
-        "/4tb/datasets/multipie_crop_patch_v2",
+        "/vcl4/Jiseung/datasets/multipie_crop_patch_v2",
         model_type="uni",
         use="train",
         res=512,
@@ -221,9 +231,11 @@ def main():
     # elif accelerator.mixed_precision == "bf16":
     #     weight_dtype = torch.bfloat16
 
-    # ------------------ 학습 루프 ------------------
+    # 🔥 start training loop
     for epoch in range(args.max_epoch):
         for idx, (lq, gt) in enumerate(dataloader):
+            lq = ddvqgan(lq)[1]  # ✅ coarse frontal face
+
             # [-1, 1] 범위로 정규화
             lq = (lq - 0.5) * 2.0
             gt = (gt - 0.5) * 2.0
@@ -248,7 +260,9 @@ def main():
 
             prompt_embeds = torch.cat(prompt_embeds)
 
-            # ---------------- Generator Update ----------------
+            """
+            🍞 Generator Update - - - - - - - - - - - - - - - - - - - -
+            """
             optimizer_g.zero_grad()
 
             # Timesteps Sampling
@@ -278,14 +292,12 @@ def main():
             restored_img = vae.decode(x_0_latent / vae.config.scaling_factor).sample
 
             # Identity Features
-            gt_feature = id_model(process_arcface_input(gt))[0].unsqueeze(0)
-            restored_feature = id_model(process_arcface_input(restored_img))[
-                0
-            ].unsqueeze(0)
+            gt_feature = id_model(process_arcface_input(gt))
+            restored_feature = id_model(process_arcface_input(restored_img))
             ID_TARGET = torch.ones((args.batch_size,), device=device)
 
             # Consistency Loss
-            loss_pixel = (
+            loss_cons = (
                 criterion_mse(restored_img, gt)
                 + criterion_perceptual(restored_img, gt)
                 + criterion_id(restored_feature, gt_feature, ID_TARGET) * args.lambda_id
@@ -295,10 +307,13 @@ def main():
             D_t = torch.randint(
                 0, 1000, (args.batch_size,), device=device, dtype=torch.long
             )
-            noise = torch.randn_like(x_0_latent)
-            z_hat_t = noise_scheduler.add_noise(x_0_latent, noise, D_t)
+            noise_fake = torch.randn_like(x_0_latent)
+            z_hat_t = noise_scheduler.add_noise(x_0_latent, noise_fake, D_t)
 
             # SDXL용 더미 데이터
+            prompt_embeds_sdxl = torch.zeros(
+                args.batch_size, 77, 2048, device=device, dtype=weight_dtype
+            )
             added_cond_kwargs = {
                 "text_embeds": torch.zeros(
                     args.batch_size, 1280, device=device, dtype=weight_dtype
@@ -309,9 +324,6 @@ def main():
                     dtype=weight_dtype,
                 ).repeat(args.batch_size, 1),
             }
-            prompt_embeds_sdxl = torch.zeros(
-                args.batch_size, 77, 2048, device=device, dtype=weight_dtype
-            )
 
             logits_fake_for_g = discriminator(
                 z_hat_t,
@@ -324,36 +336,31 @@ def main():
                 logits_fake_for_g, torch.ones_like(logits_fake_for_g)
             )
 
-            total_loss_G = loss_pixel + (args.lambda_adv * loss_G_adv)
+            total_loss_G = loss_cons + (args.lambda_adv * loss_G_adv)
             accelerator.backward(total_loss_G)
             optimizer_g.step()
 
-            # ---------------- Discriminator Update ----------------
+            """
+            🔪 Discriminator Update - - - - - - - - - - - - - - - - - - - -
+            """
             optimizer_d.zero_grad()
 
             # Real Image Noise Injection
-            z_real_t = noise_scheduler.add_noise(gt_latent, noise, D_t)
+            noise_real = torch.randn_like(gt_latent)
+            z_real_t = noise_scheduler.add_noise(gt_latent, noise_real, D_t)
 
-            # Concatenate (Fake Detached + Real)
-            # z_hat_t.detach() 필수!
-            disc_input = torch.cat([z_hat_t.detach(), z_real_t], dim=0)
-            disc_timesteps = torch.cat([D_t, D_t], dim=0)
-
-            # Conditioning도 배치 사이즈 2배로 확장
-            combined_cond_kwargs = {
-                k: torch.cat([v, v], dim=0) for k, v in added_cond_kwargs.items()
-            }
-            combined_prompt_embeds = torch.cat(
-                [prompt_embeds_sdxl, prompt_embeds_sdxl], dim=0
+            logits_fake = discriminator(
+                z_hat_t.detach(),
+                D_t,
+                encoder_hidden_states=prompt_embeds_sdxl,
+                added_cond_kwargs=added_cond_kwargs,
             )
-
-            logits = discriminator(
-                disc_input,
-                disc_timesteps,
-                encoder_hidden_states=combined_prompt_embeds,
-                added_cond_kwargs=combined_cond_kwargs,
+            logits_real = discriminator(
+                z_real_t,
+                D_t,
+                encoder_hidden_states=prompt_embeds_sdxl,
+                added_cond_kwargs=added_cond_kwargs,
             )
-            logits_fake, logits_real = torch.chunk(logits, 2, dim=0)
 
             loss_d_fake = F.binary_cross_entropy_with_logits(
                 logits_fake, torch.zeros_like(logits_fake)
@@ -370,7 +377,7 @@ def main():
             if idx % 100 == 0:
                 if accelerator.is_main_process:
                     print(
-                        f"Step {idx}: L_pix = {loss_pixel.item():.4f}, L_G = {loss_G_adv.item():.4f}, Loss D = {loss_D.item():.4f}"
+                        f"Step {idx}: L_pix = {loss_cons.item():.4f}, L_G = {loss_G_adv.item():.4f}, Loss D = {loss_D.item():.4f}"
                     )
 
             # Validation Images Saving

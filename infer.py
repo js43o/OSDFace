@@ -224,16 +224,13 @@ def main_worker(Unet, rank, gpu_id, image_names, weight_dtype, args):
 
     for image_name in tqdm(image_names):
         output_file_path = os.path.join(args.output_dir, os.path.basename(image_name))
-        if os.path.exists(output_file_path):
-            print(
-                f"Skipping {os.path.basename(image_name)} as it already exists in the output directory."
-            )
-            continue
-
         input_image = (
             Image.open(image_name)
             .convert("RGB")
-            .resize((512, 512), resample=Image.Resampling.BICUBIC)
+            .resize(
+                (args.process_size, args.process_size),
+                resample=Image.Resampling.BICUBIC,
+            )
         )
         with torch.no_grad():
             lq = (
@@ -242,11 +239,18 @@ def main_worker(Unet, rank, gpu_id, image_names, weight_dtype, args):
             )
             if lq.shape[2] == lq.shape[3]:
                 lq = Fun.interpolate(
-                    lq, (512, 512), mode="bilinear", align_corners=True
+                    lq,
+                    (args.process_size, args.process_size),
+                    mode="bilinear",
+                    align_corners=True,
                 )
 
             output_image = model(lq)
+
             output_pil = transforms.ToPILImage()(output_image[0].cpu())
+            output_pil = output_pil.resize(
+                (args.output_size, args.output_size), resample=Image.Resampling.BICUBIC
+            )
             output_pil.save(output_file_path)
 
 
@@ -256,16 +260,7 @@ def run_inference(args, Unet):
     else:
         image_names = [args.input_image]
 
-    exist_images = sorted(glob.glob(f"{args.output_dir}/*.[jpJP][pnPN]*[gG]"))
-    exist_image_names = [os.path.basename(img) for img in exist_images]
-
-    image_names = [
-        img for img in image_names if os.path.basename(img) not in exist_image_names
-    ]
-
-    print("Exist image names: ", "\n", exist_image_names)
-
-    random.shuffle(image_names)
+    # random.shuffle(image_names)
 
     weight_dtype = torch.float32
     if args.mixed_precision == "fp16":
@@ -309,11 +304,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--pretrained_model_name_or_path",
         type=str,
-        default="stabilityai/stable-diffusion-2-1-base",
+        default="Manojb/stable-diffusion-2-1-base",
         help="sd model path",
     )
     parser.add_argument("--seed", type=int, default=114, help="Random seed to be used")
     parser.add_argument("--process_size", type=int, default=512)
+    parser.add_argument("--output_size", type=int, default=128)
     parser.add_argument("--ckpt_path", type=str, required=True)
     parser.add_argument(
         "--mixed_precision", type=str, choices=["fp16", "fp32"], default="fp32"
