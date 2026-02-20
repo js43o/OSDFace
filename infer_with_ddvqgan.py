@@ -23,7 +23,7 @@ from diffusers import (
 
 from utils.vaehook import perfcount
 from utils.others import get_x0_from_noise
-from models.lq_embed import vqvae_encoder, TwoLayerConv1x1
+from models.lq_embed import TwoLayerConv1x1, vqvae_encoder, DualDecoderVQGAN
 
 
 class OSDFace_test(nn.Module):
@@ -54,10 +54,12 @@ class OSDFace_test(nn.Module):
         self.load_ckpt(args.ckpt_path)
 
         self.img_encoder = vqvae_encoder(args)
+        self.ddvqgan = DualDecoderVQGAN(args.ddvqgan_ckpt_path)
 
         self.unet.to(self.device, dtype=self.weight_dtype)
         self.vae.to(self.device, dtype=self.weight_dtype)
-        self.img_encoder.to(self.device, dtype=self.weight_dtype)
+        self.img_encoder = vqvae_encoder(args).to(self.device, dtype=self.weight_dtype)
+        self.ddvqgan.to(self.device, dtype=self.weight_dtype)
 
         self.timesteps = 399
 
@@ -90,14 +92,20 @@ class OSDFace_test(nn.Module):
         stream1 = torch.cuda.Stream()
         stream2 = torch.cuda.Stream()
 
+        coarse_ft = self.ddvqgan(lq * 0.5 + 0.5)[1]  # ✅ coarse frontal face
+        coarse_ft = torch.clamp((coarse_ft - 0.5) * 2.0, -1.0, 1.0)  # ⚠️ IMPORTANT
+
+        print("🔥", coarse_ft.shape, coarse_ft.max(), coarse_ft.min())
+        print("❄️", lq.shape, lq.max(), lq.min())
+
         with torch.cuda.stream(stream1):
-            prompt_embeds = self.img_encoder(lq).reshape(lq.shape[0], 77, -1)
+            prompt_embeds = self.img_encoder(lq).reshape(1, 77, -1) * 2.0
             if not self.args.cat_prompt_embedding:
                 prompt_embeds = self.embedding_change(prompt_embeds)
 
         with torch.cuda.stream(stream2):
             lq_latent = (
-                self.vae.encode(lq.to(self.weight_dtype)).latent_dist.sample()
+                self.vae.encode(coarse_ft.to(self.weight_dtype)).latent_dist.sample()
                 * self.vae.config.scaling_factor
             )
 
@@ -120,102 +128,9 @@ class OSDFace_test(nn.Module):
             ).sample
         ).clamp(-1, 1)
         output_image = output_image * 0.5 + 0.5
+        coarse_ft_image = coarse_ft * 0.5 + 0.5
 
-        return output_image.clamp(0.0, 1.0)
-
-
-"""
-def merge_Unet(args):
-    unet = UNet2DConditionModel.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="unet"
-    )
-    lora_alpha = args.lora_alpha
-    lora_rank = args.lora_rank
-    alpha = float(lora_alpha / lora_rank)
-    processed_keys = set()
-    with safe_open(
-        os.path.join(args.ckpt_path, "pytorch_lora_weights.safetensors"), framework="pt"
-    ) as f:
-        state_dict = {key: f.get_tensor(key) for key in f.keys()}
-
-    state_dict_unet = unet.state_dict()
-
-    for key in state_dict.keys():
-        if "lora_A" in key:
-            lora_a_key = key
-            lora_b_key = key.replace("lora_A", "lora_B")
-            unet_key = key.replace(".lora_A.weight", ".weight").replace("unet.", "")
-
-            assert lora_b_key in state_dict and unet_key in state_dict_unet
-            W_A = state_dict[lora_a_key]
-            W_B = state_dict[lora_b_key]
-            original_weight = state_dict_unet[unet_key]
-            processed_keys.update([lora_a_key, lora_b_key])
-            if (
-                len(original_weight.shape) == 4
-                and len(W_A.shape) == 4
-                and len(W_B.shape) == 4
-            ):
-                out_channels, in_channels, kH, kW = original_weight.shape
-                rank = W_A.shape[0]
-                # print(rank)
-                assert (
-                    rank == lora_rank
-                ), f"lora rank should be {rank}, but {lora_alpha}"
-                assert W_A.shape == (
-                    rank,
-                    in_channels,
-                    kH,
-                    kW,
-                ), "W_A shape not matching! "
-                assert W_B.shape == (
-                    out_channels,
-                    rank,
-                    1,
-                    1,
-                ), "W_B shape not matching! "
-                W_A_flat = W_A.view(rank, -1)  # (rank, in_channels * kH * kW)
-                W_B_flat = W_B.view(out_channels, rank)  # (out_channels, rank)
-                delta_W_flat = torch.matmul(
-                    W_B_flat, W_A_flat
-                )  # (out_channels, in_channels * kH * kW)
-                delta_W = delta_W_flat.view(out_channels, in_channels, kH, kW)
-                merged_weight = original_weight + alpha * delta_W
-            else:
-                merged_weight = original_weight + alpha * torch.mm(W_B, W_A)
-            state_dict_unet[unet_key] = merged_weight
-        elif "lora.up.weight" in key:
-            lora_up_key = key
-            lora_down_key = key.replace("lora.up.weight", "lora.down.weight")
-
-            original_weight_key = key.replace(".lora.up.weight", ".weight").replace(
-                "unet.", ""
-            )
-            assert (
-                lora_down_key in state_dict and original_weight_key in state_dict_unet
-            )
-            W_up = state_dict[lora_up_key]
-            W_down = state_dict[lora_down_key]
-            W_orig = state_dict_unet[original_weight_key]
-            processed_keys.update([lora_up_key, lora_down_key])
-
-            if W_orig.ndim == 2:
-                delta_W = torch.matmul(W_up, W_down)
-                W_merged = W_orig + alpha * delta_W
-
-            else:
-                print(f"Warning: Unhandled weight shape for {original_weight_key}")
-                continue
-            state_dict_unet[original_weight_key] = W_merged
-    remaining_lora_keys = [k for k in state_dict.keys() if k not in processed_keys]
-    if remaining_lora_keys:
-        print("Warning: There are unprocessed LoRA weights:")
-        for key in remaining_lora_keys:
-            print(f" - {key}")
-    print("Merge Done!")
-    unet.load_state_dict(state_dict_unet)
-    return unet
-"""
+        return output_image.clamp(0.0, 1.0), coarse_ft_image.clamp(0.0, 1.0)
 
 
 def main_worker(Unet, rank, gpu_id, image_names, weight_dtype, args):
@@ -235,22 +150,26 @@ def main_worker(Unet, rank, gpu_id, image_names, weight_dtype, args):
         )
         with torch.no_grad():
             lq = (
-                F.to_tensor(input_image).unsqueeze(0).to(gpu_id, dtype=weight_dtype) * 2
-                - 1
+                (F.to_tensor(input_image) * 2.0 - 1.0)
+                .unsqueeze(0)
+                .to(gpu_id, dtype=weight_dtype)
             )
-            if lq.shape[2] == lq.shape[3]:
-                lq = Fun.interpolate(
-                    lq,
-                    (args.process_size, args.process_size),
-                    mode="bilinear",
-                    align_corners=True,
-                )
+            lq = Fun.interpolate(
+                lq,
+                (args.process_size, args.process_size),
+                mode="bilinear",
+                align_corners=True,
+            )
 
-            output_image = model(lq)
+            output_image, coarse_ft = model(lq)
+            # concat with original input
+            lq_image = lq * 0.5 + 0.5
+            output_image = torch.cat([lq_image, coarse_ft, output_image], dim=-1)
 
             output_pil = transforms.ToPILImage()(output_image[0].cpu())
             output_pil = output_pil.resize(
-                (args.output_size, args.output_size), resample=Image.Resampling.BICUBIC
+                (args.output_size * 3, args.output_size),
+                resample=Image.Resampling.BICUBIC,
             )
             output_pil.save(output_file_path)
 
@@ -316,7 +235,12 @@ if __name__ == "__main__":
         "--mixed_precision", type=str, choices=["fp16", "fp32"], default="fp32"
     )
     parser.add_argument(
-        "--img_encoder_weight", type=str, default="pretrained/associate_2.ckpt"
+        "--img_encoder_weight", type=str, default="pretrained/ddvqgan_encoder.ckpt"
+    )
+    parser.add_argument(
+        "--ddvqgan_ckpt_path",
+        type=str,
+        default="pretrained/model.safetensors",
     )
     parser.add_argument(
         "--gpu_ids", nargs="+", type=int, default=[0], help="List of GPU IDs to use"

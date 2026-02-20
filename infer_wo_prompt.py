@@ -23,7 +23,6 @@ from diffusers import (
 
 from utils.vaehook import perfcount
 from utils.others import get_x0_from_noise
-from models.lq_embed import vqvae_encoder, TwoLayerConv1x1
 
 
 class OSDFace_test(nn.Module):
@@ -53,24 +52,12 @@ class OSDFace_test(nn.Module):
 
         self.load_ckpt(args.ckpt_path)
 
-        self.img_encoder = vqvae_encoder(args)
-
         self.unet.to(self.device, dtype=self.weight_dtype)
         self.vae.to(self.device, dtype=self.weight_dtype)
-        self.img_encoder.to(self.device, dtype=self.weight_dtype)
 
         self.timesteps = 399
 
     def load_ckpt(self, ckpt_path):
-        if not self.args.cat_prompt_embedding:
-            self.embedding_change = TwoLayerConv1x1(512, 1024)
-            self.embedding_change.load_state_dict(
-                torch.load(
-                    os.path.join(ckpt_path, "embedding_change.pth"),
-                    weights_only=False,
-                )
-            )
-            self.embedding_change.to(self.device, dtype=self.weight_dtype)
         if not self.args.merge_lora:
             pipe = StableDiffusionPipeline(
                 vae=self.vae,
@@ -90,11 +77,6 @@ class OSDFace_test(nn.Module):
         stream1 = torch.cuda.Stream()
         stream2 = torch.cuda.Stream()
 
-        with torch.cuda.stream(stream1):
-            prompt_embeds = self.img_encoder(lq).reshape(lq.shape[0], 77, -1)
-            if not self.args.cat_prompt_embedding:
-                prompt_embeds = self.embedding_change(prompt_embeds)
-
         with torch.cuda.stream(stream2):
             lq_latent = (
                 self.vae.encode(lq.to(self.weight_dtype)).latent_dist.sample()
@@ -104,7 +86,11 @@ class OSDFace_test(nn.Module):
         torch.cuda.synchronize()
 
         model_pred = self.unet(
-            lq_latent, self.timesteps, encoder_hidden_states=prompt_embeds
+            lq_latent,
+            self.timesteps,
+            encoder_hidden_states=torch.zeros(
+                1, 77, 1024, device=self.device, dtype=self.weight_dtype
+            ),
         ).sample
 
         x_0 = get_x0_from_noise(
@@ -314,9 +300,6 @@ if __name__ == "__main__":
     parser.add_argument("--ckpt_path", type=str, required=True)
     parser.add_argument(
         "--mixed_precision", type=str, choices=["fp16", "fp32"], default="fp32"
-    )
-    parser.add_argument(
-        "--img_encoder_weight", type=str, default="pretrained/associate_2.ckpt"
     )
     parser.add_argument(
         "--gpu_ids", nargs="+", type=int, default=[0], help="List of GPU IDs to use"

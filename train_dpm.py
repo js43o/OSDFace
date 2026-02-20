@@ -32,7 +32,7 @@ def parse_args():
     )
     parser.add_argument("--seed", type=int, default=114)
     parser.add_argument("--max_epoch", type=int, default=16)
-    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--batch_size", type=int, default=3)
     parser.add_argument(
         "--lambda_adv", type=float, default=1e-2, help="Adversarial loss weight"
     )
@@ -105,7 +105,7 @@ def main():
     embedding_change = TwoLayerConv1x1(512, 1024).to(device=device)
     embedding_change.load_state_dict(
         torch.load(
-            os.path.join(args.ckpt_path, "embedding_change_weights.pth"),
+            os.path.join(args.ckpt_path, "embedding_change.pth"),
             weights_only=False,
         )
     )
@@ -125,7 +125,7 @@ def main():
         safety_checker=None,
         feature_extractor=None,
     )
-    pipe.load_lora_weights(args.ckpt_path)
+    pipe.load_lora_weights(args.ckpt_path, weight_name="unet_lora.safetensors")
     pipe.unet.train()
     pipe.unet.requires_grad_(False)
 
@@ -231,10 +231,12 @@ def main():
 
             # VAE Encoding
             with torch.no_grad():
+                """
                 lq_latent = (
                     vae.encode(lq.to(dtype=weight_dtype)).latent_dist.sample()
                     * vae.config.scaling_factor
                 )
+                """
                 gt_latent = (
                     vae.encode(gt.to(dtype=weight_dtype)).latent_dist.sample()
                     * vae.config.scaling_factor
@@ -262,16 +264,18 @@ def main():
             timesteps_g = torch.randint(
                 0, 1000, (args.batch_size,), device=device, dtype=torch.long
             )
+            noise = torch.randn_like(gt_latent)
+            noisy_gt_latent = noise_scheduler.add_noise(gt_latent, noise, timesteps_g)
 
             # UNet Inference
-            model_pred = pipe.unet(
-                lq_latent, timesteps_g, encoder_hidden_states=prompt_embeds
+            noise_pred = pipe.unet(
+                noisy_gt_latent, timesteps_g, encoder_hidden_states=prompt_embeds
             ).sample
 
             # x0 예측 (Reconstruction)
             x_0_latent = get_x0_from_noise(
-                lq_latent,
-                model_pred,
+                noisy_gt_latent,
+                noise_pred,
                 noise_scheduler.alphas_cumprod.to(device),
                 timesteps_g,
             )
@@ -285,7 +289,7 @@ def main():
             ID_TARGET = torch.ones((args.batch_size,), device=device)
 
             # Consistency Loss
-            loss_cons = (
+            loss_consist = (
                 criterion_mse(restored_img, gt)
                 + criterion_perceptual(restored_img, gt)
                 + criterion_id(restored_feature, gt_feature, ID_TARGET) * args.lambda_id
@@ -324,7 +328,7 @@ def main():
                 logits_fake_for_g, torch.ones_like(logits_fake_for_g)
             )
 
-            total_loss_G = loss_cons + (args.lambda_adv * loss_G_adv)
+            total_loss_G = loss_consist + (args.lambda_adv * loss_G_adv)
             accelerator.backward(total_loss_G)
             optimizer_g.step()
 
@@ -365,7 +369,7 @@ def main():
             if idx % 100 == 0:
                 if accelerator.is_main_process:
                     print(
-                        f"Step {idx}: L_pix = {loss_cons.item():.4f}, L_G = {loss_G_adv.item():.4f}, Loss D = {loss_D.item():.4f}"
+                        f"Step {idx}: L_pix = {loss_consist.item():.4f}, L_G = {loss_G_adv.item():.4f}, Loss D = {loss_D.item():.4f}"
                     )
 
             # Validation Images Saving

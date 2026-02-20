@@ -234,7 +234,7 @@ def main():
     # 🔥 start training loop
     for epoch in range(args.max_epoch):
         for idx, (lq, gt) in enumerate(dataloader):
-            lq = ddvqgan(lq)[1]  # ✅ coarse frontal face
+            lq = ddvqgan(lq)[1]  # ✅ coarse HQ frontal face
 
             # [-1, 1] 범위로 정규화
             lq = (lq - 0.5) * 2.0
@@ -257,7 +257,6 @@ def main():
                 prompt_embed = img_encoder(lq_batch.unsqueeze(0)).reshape(1, 77, -1)
                 prompt_embed = embedding_change(prompt_embed)
                 prompt_embeds.append(prompt_embed)
-
             prompt_embeds = torch.cat(prompt_embeds)
 
             """

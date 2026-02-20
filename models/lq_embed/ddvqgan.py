@@ -1072,7 +1072,10 @@ class DualDecoderVQGAN(nn.Module):
 
             ckpt = load_file(self.checkpoint)
             missing, unexpected = self.load_state_dict(ckpt)
-            print("🕒 checkpoint is loaded", len(missing), len(unexpected))
+            if missing:
+                print("⚠️ missing keys:", missing)
+            if unexpected:
+                print("⚠️ unexpected keys:", unexpected)
 
     def encode(self, x):
         hs = self.encoder(x)

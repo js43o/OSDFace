@@ -59,7 +59,7 @@ class OSDFace_test(nn.Module):
         self.vae.to(self.device, dtype=self.weight_dtype)
         self.img_encoder.to(self.device, dtype=self.weight_dtype)
 
-        self.timesteps = 399
+        self.timesteps = 999
 
     def load_ckpt(self, ckpt_path):
         if not self.args.cat_prompt_embedding:
@@ -103,12 +103,13 @@ class OSDFace_test(nn.Module):
 
         torch.cuda.synchronize()
 
+        noise = torch.randn_like(lq_latent)
         model_pred = self.unet(
-            lq_latent, self.timesteps, encoder_hidden_states=prompt_embeds
+            noise, self.timesteps, encoder_hidden_states=prompt_embeds
         ).sample
 
         x_0 = get_x0_from_noise(
-            lq_latent.double(),
+            noise.double(),
             model_pred.double(),
             self.alphas_cumprod.double(),
             self.timesteps,
@@ -122,100 +123,6 @@ class OSDFace_test(nn.Module):
         output_image = output_image * 0.5 + 0.5
 
         return output_image.clamp(0.0, 1.0)
-
-
-"""
-def merge_Unet(args):
-    unet = UNet2DConditionModel.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="unet"
-    )
-    lora_alpha = args.lora_alpha
-    lora_rank = args.lora_rank
-    alpha = float(lora_alpha / lora_rank)
-    processed_keys = set()
-    with safe_open(
-        os.path.join(args.ckpt_path, "pytorch_lora_weights.safetensors"), framework="pt"
-    ) as f:
-        state_dict = {key: f.get_tensor(key) for key in f.keys()}
-
-    state_dict_unet = unet.state_dict()
-
-    for key in state_dict.keys():
-        if "lora_A" in key:
-            lora_a_key = key
-            lora_b_key = key.replace("lora_A", "lora_B")
-            unet_key = key.replace(".lora_A.weight", ".weight").replace("unet.", "")
-
-            assert lora_b_key in state_dict and unet_key in state_dict_unet
-            W_A = state_dict[lora_a_key]
-            W_B = state_dict[lora_b_key]
-            original_weight = state_dict_unet[unet_key]
-            processed_keys.update([lora_a_key, lora_b_key])
-            if (
-                len(original_weight.shape) == 4
-                and len(W_A.shape) == 4
-                and len(W_B.shape) == 4
-            ):
-                out_channels, in_channels, kH, kW = original_weight.shape
-                rank = W_A.shape[0]
-                # print(rank)
-                assert (
-                    rank == lora_rank
-                ), f"lora rank should be {rank}, but {lora_alpha}"
-                assert W_A.shape == (
-                    rank,
-                    in_channels,
-                    kH,
-                    kW,
-                ), "W_A shape not matching! "
-                assert W_B.shape == (
-                    out_channels,
-                    rank,
-                    1,
-                    1,
-                ), "W_B shape not matching! "
-                W_A_flat = W_A.view(rank, -1)  # (rank, in_channels * kH * kW)
-                W_B_flat = W_B.view(out_channels, rank)  # (out_channels, rank)
-                delta_W_flat = torch.matmul(
-                    W_B_flat, W_A_flat
-                )  # (out_channels, in_channels * kH * kW)
-                delta_W = delta_W_flat.view(out_channels, in_channels, kH, kW)
-                merged_weight = original_weight + alpha * delta_W
-            else:
-                merged_weight = original_weight + alpha * torch.mm(W_B, W_A)
-            state_dict_unet[unet_key] = merged_weight
-        elif "lora.up.weight" in key:
-            lora_up_key = key
-            lora_down_key = key.replace("lora.up.weight", "lora.down.weight")
-
-            original_weight_key = key.replace(".lora.up.weight", ".weight").replace(
-                "unet.", ""
-            )
-            assert (
-                lora_down_key in state_dict and original_weight_key in state_dict_unet
-            )
-            W_up = state_dict[lora_up_key]
-            W_down = state_dict[lora_down_key]
-            W_orig = state_dict_unet[original_weight_key]
-            processed_keys.update([lora_up_key, lora_down_key])
-
-            if W_orig.ndim == 2:
-                delta_W = torch.matmul(W_up, W_down)
-                W_merged = W_orig + alpha * delta_W
-
-            else:
-                print(f"Warning: Unhandled weight shape for {original_weight_key}")
-                continue
-            state_dict_unet[original_weight_key] = W_merged
-    remaining_lora_keys = [k for k in state_dict.keys() if k not in processed_keys]
-    if remaining_lora_keys:
-        print("Warning: There are unprocessed LoRA weights:")
-        for key in remaining_lora_keys:
-            print(f" - {key}")
-    print("Merge Done!")
-    unet.load_state_dict(state_dict_unet)
-    return unet
-"""
 
 
 def main_worker(Unet, rank, gpu_id, image_names, weight_dtype, args):
