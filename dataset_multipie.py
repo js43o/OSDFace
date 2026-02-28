@@ -97,14 +97,6 @@ class MultiPIEDataset(Dataset):
             gt_image, dsize=(self.res, self.res), interpolation=cv2.INTER_CUBIC
         )
 
-        # random horizontal flip
-        input_image, _status = augment(
-            input_image, hflip=True, rotation=False, return_status=True
-        )
-        gt_image, _status = augment(
-            gt_image, hflip=True, rotation=False, return_status=True
-        )
-
         input_image = input_image.astype(np.float32) / 255.0
         gt_image = gt_image.astype(np.float32) / 255.0
 
