@@ -244,7 +244,7 @@ def main():
             cr_out_list = []
             for b in range(lq_resized.shape[0]):
                 pid = int(filename[b][:3])
-                cr_idx = min(pid % 40, len(cr_modules) - 1)
+                cr_idx = min(pid // 40, len(cr_modules) - 1)
                 cr_out_b = cr_modules[cr_idx](lq_resized[b].unsqueeze(0))
                 cr_out_list.append(cr_out_b)
 
