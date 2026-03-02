@@ -63,13 +63,13 @@ def parse_args():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="experiments/12",
+        default="experiments/13",
         help="Root directory for saving results",
     )
     parser.add_argument(
         "--save_image_steps",
         type=int,
-        default=1000,
+        default=200,
         help="Interval to save image samples",
     )
     parser.add_argument(
@@ -192,7 +192,9 @@ def main():
 
     # Optimizer & Loss
     optimizer_g = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, pipe.unet.parameters()), lr=1e-4
+        list(filter(lambda p: p.requires_grad, pipe.unet.parameters()))
+        + list(embedding_change.parameters()),
+        lr=1e-4,
     )
     optimizer_d = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, discriminator.parameters()), lr=1e-4
@@ -239,6 +241,7 @@ def main():
     # 🔥 start training loop
     for epoch in range(args.max_epoch):
         for idx, (lq, gt, filename) in enumerate(dataloader):
+            bs = gt.shape[0]
             lq_resized = interpolate(lq, size=(128, 128), mode="bicubic")
 
             cr_out_list = []
@@ -287,6 +290,9 @@ def main():
                 prompt_embed = embedding_change(prompt_embed)
                 prompt_embeds.append(prompt_embed)
             prompt_embeds = torch.cat(prompt_embeds)
+            prompt_embeds = F.normalize(
+                prompt_embeds, dim=-1
+            )  # SD text embedding scale 근사
 
             """
             🍞 Generator Update - - - - - - - - - - - - - - - - - - - -
@@ -294,12 +300,10 @@ def main():
             optimizer_g.zero_grad()
 
             # Timesteps Sampling
-            timesteps_g = torch.full(
-                (args.batch_size,), 399, device=device, dtype=torch.long
-            )
+            timesteps_g = torch.full((bs,), 399, device=device, dtype=torch.long)
             """
             timesteps_g = torch.randint(
-                0, 1000, (args.batch_size,), device=device, dtype=torch.long
+                0, 1000, (bs,), device=device, dtype=torch.long
             )
             """
 
@@ -322,16 +326,13 @@ def main():
             # VAE Decoding
             restored_img = vae.decode(x_0_latent / vae.config.scaling_factor).sample
 
-            # [-1, 1] 범위로 제한
-            restored_img = torch.tanh(restored_img)
-
             # if accelerator.is_main_process:
             #     print("🚩 3.", restored_img.min(), restored_img.max())
 
             # Identity Features
             gt_feature = id_model(process_arcface_input(gt))
             restored_feature = id_model(process_arcface_input(restored_img))
-            ID_TARGET = torch.ones((args.batch_size,), device=device)
+            ID_TARGET = torch.ones((bs,), device=device)
 
             # Consistency Loss
             loss_cons = (
@@ -341,25 +342,21 @@ def main():
             )
 
             # Noise Sampling for Discriminator
-            D_t = torch.randint(
-                0, 1000, (args.batch_size,), device=device, dtype=torch.long
-            )
+            D_t = torch.randint(0, 1000, (bs,), device=device, dtype=torch.long)
             noise_fake = torch.randn_like(x_0_latent)
             z_hat_t = noise_scheduler.add_noise(x_0_latent, noise_fake, D_t)
 
             # SDXL용 더미 데이터
             prompt_embeds_sdxl = torch.zeros(
-                args.batch_size, 77, 2048, device=device, dtype=weight_dtype
+                bs, 77, 2048, device=device, dtype=weight_dtype
             )
             added_cond_kwargs = {
-                "text_embeds": torch.zeros(
-                    args.batch_size, 1280, device=device, dtype=weight_dtype
-                ),
+                "text_embeds": torch.zeros(bs, 1280, device=device, dtype=weight_dtype),
                 "time_ids": torch.tensor(
                     [[1024.0, 1024.0, 0.0, 0.0, 1024.0, 1024.0]],
                     device=device,
                     dtype=weight_dtype,
-                ).repeat(args.batch_size, 1),
+                ).repeat(bs, 1),
             }
 
             logits_fake_for_g = discriminator(
@@ -429,7 +426,7 @@ def main():
                         vis_restored = process_visual_image(restored_img)
                         vis_gt = process_visual_image(gt)
 
-                        n_save = min(4, args.batch_size)
+                        n_save = min(4, bs)
                         grid = torch.cat(
                             [
                                 vis_lq[:n_save],

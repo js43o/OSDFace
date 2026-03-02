@@ -65,8 +65,10 @@ class MultiPIEDataset(Dataset):
         input_image = cv2.imread(self.input_paths[index])
         gt_image = cv2.imread(self.gt_paths[index])
 
+        SIZE_SMALL = 128  # 열화 적용 전용 해상도
+
         input_image = cv2.resize(
-            input_image, dsize=(self.size, self.size), interpolation=cv2.INTER_CUBIC
+            input_image, dsize=(SIZE_SMALL, SIZE_SMALL), interpolation=cv2.INTER_CUBIC
         )
         gt_image = cv2.resize(
             gt_image, dsize=(self.size, self.size), interpolation=cv2.INTER_CUBIC
@@ -77,28 +79,28 @@ class MultiPIEDataset(Dataset):
 
         if self.use_blind:
             # blur
-            cur_kernel_size = random.randint(19, 20) * 2 + 1
+            cur_kernel_size = random.randint(4, 5) * 2 + 1
             kernel = degradations.random_mixed_kernels(
                 ["iso", "aniso"],
                 [0.5, 0.5],
                 cur_kernel_size,
-                [0.1, 2.0],
-                [0.1, 2.0],
+                [0.1, 1.0],
+                [0.1, 1.0],
                 [-math.pi, math.pi],
                 noise_range=None,
             )
             input_image = cv2.filter2D(input_image, -1, kernel)
 
             # downsample
-            scale = np.random.uniform(0.8, 8.0)
+            scale = np.random.uniform(1.0, 8.0)
             input_image = cv2.resize(
                 input_image,
-                (int(self.size // scale), int(self.size // scale)),
+                (int(SIZE_SMALL // scale), int(SIZE_SMALL // scale)),
                 interpolation=cv2.INTER_LINEAR,
             )
 
             # noise
-            input_image = degradations.random_add_gaussian_noise(input_image, [0, 10])
+            input_image = degradations.random_add_gaussian_noise(input_image, [0, 5])
 
             # jpeg compression
             input_image = degradations.random_add_jpg_compression(
