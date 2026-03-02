@@ -89,7 +89,7 @@ class CrossAttentionWithFeatureKey(nn.Module):
 
 
 class CoarseRestorer(nn.Module):
-    def __init__(self, res=128, in_channels=3, width=64):
+    def __init__(self, res=128, in_channels=3, width=32):
         super().__init__()
 
         self.intro = nn.Conv2d(

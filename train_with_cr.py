@@ -35,7 +35,7 @@ def parse_args():
         default="Manojb/stable-diffusion-2-1-base",
     )
     parser.add_argument("--seed", type=int, default=114)
-    parser.add_argument("--max_epoch", type=int, default=16)
+    parser.add_argument("--max_epoch", type=int, default=15)
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument(
         "--lambda_adv", type=float, default=1e-2, help="Adversarial loss weight"
@@ -63,13 +63,13 @@ def parse_args():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="experiments/10",
+        default="experiments/12",
         help="Root directory for saving results",
     )
     parser.add_argument(
         "--save_image_steps",
         type=int,
-        default=2000,
+        default=1000,
         help="Interval to save image samples",
     )
     parser.add_argument(
@@ -77,12 +77,6 @@ def parse_args():
         type=int,
         default=1,
         help="Interval to save model checkpoints",
-    )
-    parser.add_argument(
-        "--cr_ckpt",
-        type=str,
-        default="/vcl4/Jiseung/python/FSRpFT/checkpoints/cr/10_uni_pix=1.0_vgg_0.001_adv=0.0025_id=0.0025/10/model.safetensors",
-        help="Path to checkpoint (.safetensors) of coarse restoration module",
     )
     return parser.parse_args()
 
@@ -125,10 +119,16 @@ def main():
     img_encoder.requires_grad_(False)
     img_encoder.eval()
 
-    cr_model = CoarseRestorer().to(device=device)
-    cr_model.load_state_dict(load_file(args.cr_ckpt), strict=False)
-    cr_model.requires_grad_(False)
-    cr_model.eval()
+    cr_modules = []
+    for i in range(5):
+        cr_module = CoarseRestorer(width=32).to(device=device)
+        cr_module.load_state_dict(
+            load_file("pretrained/cr/%s:%s/model.safetensors" % (i * 40, i * 40 + 40)),
+            strict=False,
+        )
+        cr_module.requires_grad_(False)
+        cr_module.eval()
+        cr_modules.append(cr_module)
 
     # SD Pipeline with LoRA
     pipe = StableDiffusionPipeline(
@@ -205,9 +205,8 @@ def main():
     # DataLoader
     dataset = MultiPIEDataset(
         "/vcl4/Jiseung/datasets/multipie_crop_patch_v2",
-        model_type="uni",
-        use="train",
-        res=512,
+        phase="train",
+        size=512,
         use_blind=True,
     )
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
@@ -239,15 +238,36 @@ def main():
 
     # 🔥 start training loop
     for epoch in range(args.max_epoch):
-        for idx, (lq, gt) in enumerate(dataloader):
+        for idx, (lq, gt, filename) in enumerate(dataloader):
             lq_resized = interpolate(lq, size=(128, 128), mode="bicubic")
-            cr_out = cr_model(lq_resized)  # coarse frontal face
+
+            cr_out_list = []
+            for b in range(lq_resized.shape[0]):
+                pid = int(filename[b][:3])
+                cr_idx = min(pid % 40, len(cr_modules) - 1)
+                cr_out_b = cr_modules[cr_idx](lq_resized[b].unsqueeze(0))
+                cr_out_list.append(cr_out_b)
+
+            cr_out = torch.cat(cr_out_list, dim=0)
             mq_f = interpolate(cr_out, size=(512, 512), mode="bicubic")
 
             # [-1, 1] 범위로 정규화
             lq = (lq - 0.5) * 2.0
             mq_f = (mq_f - 0.5) * 2.0
             gt = (gt - 0.5) * 2.0
+
+            """
+            if accelerator.is_main_process:
+                print(
+                    "🚩 1.",
+                    lq.min(),
+                    lq.max(),
+                    mq_f.min(),
+                    mq_f.max(),
+                    gt.min(),
+                    gt.max(),
+                )
+            """
 
             # VAE Encoding
             with torch.no_grad():
@@ -274,7 +294,6 @@ def main():
             optimizer_g.zero_grad()
 
             # Timesteps Sampling
-            """
             timesteps_g = torch.full(
                 (args.batch_size,), 399, device=device, dtype=torch.long
             )
@@ -282,11 +301,15 @@ def main():
             timesteps_g = torch.randint(
                 0, 1000, (args.batch_size,), device=device, dtype=torch.long
             )
+            """
 
             # UNet Inference
             model_pred = pipe.unet(
                 mq_f_latent, timesteps_g, encoder_hidden_states=prompt_embeds
             ).sample
+
+            # if accelerator.is_main_process:
+            #     print("🚩 2.", model_pred.min(), model_pred.max())
 
             # x0 예측 (Reconstruction)
             x_0_latent = get_x0_from_noise(
@@ -298,6 +321,12 @@ def main():
 
             # VAE Decoding
             restored_img = vae.decode(x_0_latent / vae.config.scaling_factor).sample
+
+            # [-1, 1] 범위로 제한
+            restored_img = torch.tanh(restored_img)
+
+            # if accelerator.is_main_process:
+            #     print("🚩 3.", restored_img.min(), restored_img.max())
 
             # Identity Features
             gt_feature = id_model(process_arcface_input(gt))

@@ -33,43 +33,23 @@ class MultiPIEDataset(Dataset):
 
         return img_input, img_gt
 
-    def __init__(
-        self,
-        dataroot: str,
-        model_type="uni",
-        use="train",
-        res=128,
-        use_blind=False,  # using blind degradation model
-        use_patch=False,  # using facial components patches
-    ):
+    def __init__(self, dataroot: str, phase="train", size=128, use_blind=False):
         super().__init__()
-        self.dataroot = os.path.join(dataroot, use)
-        self.res = res
+        self.dataroot = os.path.join(dataroot, phase)
+        self.size = size
         self.use_blind = use_blind
-        self.use_patch = use_patch
 
         self.input_paths = []
         self.input_angles = []
         self.gt_paths = []
-        self.gt_patch_paths = []
+        self.filenames = []
 
-        if model_type == "e2m":
-            angles = ANGLES_EXTREME
-            gt_angles = GT_ANGLES_MODERATE
-        elif model_type == "m2f":
-            angles = ANGLES_MODERATE
-            gt_angles = GT_ANGLES_FRONTAL
-        elif model_type == "e2f":
-            angles = ANGLES_EXTREME
-            gt_angles = GT_ANGLES_FRONTAL
-        elif model_type == "uni":
-            angles = [*ANGLES_EXTREME, *ANGLES_MODERATE]
-            gt_angles = GT_ANGLES_FRONTAL
+        angles = [*ANGLES_EXTREME, *ANGLES_MODERATE]
+        gt_angle = GT_ANGLES_FRONTAL[0]
 
         for pid in sorted(os.listdir(self.dataroot)):
-            for idx, angle in enumerate(angles):
+            for angle in angles:
                 for light in LIGHT_COND:
-                    gt_angle = gt_angles[0] if idx < len(angles) // 2 else gt_angles[1]
                     gt_path = os.path.join(
                         self.dataroot, pid, gt_angle, "%s.png" % light
                     )
@@ -79,22 +59,17 @@ class MultiPIEDataset(Dataset):
                     if all(map(os.path.exists, [gt_path, input_path])):
                         self.input_paths.append(input_path)
                         self.gt_paths.append(gt_path)
-
-                        if self.use_patch:
-                            gt_patch_path = os.path.join(
-                                self.dataroot, pid, gt_angle, "%s_patch.png" % light
-                            )
-                            self.gt_patch_paths.append(gt_patch_path)
+                        self.filenames.append("%s_%s_%s.png" % (pid, angle, light))
 
     def __getitem__(self, index):
         input_image = cv2.imread(self.input_paths[index])
         gt_image = cv2.imread(self.gt_paths[index])
 
         input_image = cv2.resize(
-            input_image, dsize=(self.res, self.res), interpolation=cv2.INTER_CUBIC
+            input_image, dsize=(self.size, self.size), interpolation=cv2.INTER_CUBIC
         )
         gt_image = cv2.resize(
-            gt_image, dsize=(self.res, self.res), interpolation=cv2.INTER_CUBIC
+            gt_image, dsize=(self.size, self.size), interpolation=cv2.INTER_CUBIC
         )
 
         input_image = input_image.astype(np.float32) / 255.0
@@ -118,7 +93,7 @@ class MultiPIEDataset(Dataset):
             scale = np.random.uniform(0.8, 8.0)
             input_image = cv2.resize(
                 input_image,
-                (int(self.res // scale), int(self.res // scale)),
+                (int(self.size // scale), int(self.size // scale)),
                 interpolation=cv2.INTER_LINEAR,
             )
 
@@ -132,7 +107,7 @@ class MultiPIEDataset(Dataset):
 
             # resize to original size
             input_image = cv2.resize(
-                input_image, (self.res, self.res), interpolation=cv2.INTER_LINEAR
+                input_image, (self.size, self.size), interpolation=cv2.INTER_LINEAR
             )
 
             # random color jitter
@@ -147,11 +122,11 @@ class MultiPIEDataset(Dataset):
         else:
             input_image = cv2.resize(
                 input_image,
-                dsize=(self.res // 4, self.res // 4),
+                dsize=(self.size // 4, self.size // 4),
                 interpolation=cv2.INTER_CUBIC,
             )
             input_image = cv2.resize(
-                input_image, dsize=(self.res, self.res), interpolation=cv2.INTER_CUBIC
+                input_image, dsize=(self.size, self.size), interpolation=cv2.INTER_CUBIC
             )
 
         # BGR to RGB, HWC to CHW, numpy to tensor
@@ -162,16 +137,7 @@ class MultiPIEDataset(Dataset):
         # round and clip
         input_image = torch.clamp((input_image * 255.0).round(), 0, 255) / 255.0
 
-        if self.use_patch:
-            gt_patch = to_tensor(
-                Image.open(self.gt_patch_paths[index])
-                .convert("RGB")
-                .resize((self.res, self.res), Image.Resampling.BICUBIC)
-            )
-
-            return input_image, gt_image, gt_patch
-
-        return input_image, gt_image
+        return input_image, gt_image, self.filenames[index]
 
     def __len__(self):
         return len(self.gt_paths)
@@ -181,7 +147,7 @@ class MultiPIEDatasetWithSingleView(Dataset):
     def __init__(self, dataroot: str, angle: str, use="train", res=128):
         super().__init__()
         self.dataroot = os.path.join(dataroot, use)
-        self.res = res
+        self.size = res
         self.angle = angle
 
         self.input_paths = []
@@ -223,8 +189,10 @@ class MultiPIEDatasetWithSingleView(Dataset):
         input_image = input_image.resize(
             (32, 32), Image.Resampling.BICUBIC
         )  # make it low-resolution
-        input_image = input_image.resize((self.res, self.res), Image.Resampling.BICUBIC)
-        gt_image = gt_image.resize((self.res, self.res), Image.Resampling.BICUBIC)
+        input_image = input_image.resize(
+            (self.size, self.size), Image.Resampling.BICUBIC
+        )
+        gt_image = gt_image.resize((self.size, self.size), Image.Resampling.BICUBIC)
         gt_patch = (
             Image.open(self.gt_patches[index])
             .convert("RGB")
