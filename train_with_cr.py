@@ -140,6 +140,7 @@ def main():
         safety_checker=None,
         feature_extractor=None,
     )
+    """
     pipe.load_lora_weights(args.ckpt_path, weight_name="unet_lora.safetensors")
     pipe.unet.train()
     pipe.unet.requires_grad_(False)
@@ -151,6 +152,7 @@ def main():
             name_new = name.replace(".default_0", "")
             param.requires_grad = True
             unet_lora_state_dict[name_new] = param
+    """
 
     # Identity Model
     id_model = resnet_face18(use_se=False).to(device=device)
@@ -165,7 +167,7 @@ def main():
     discriminator = SDXLPartialDiscriminator(
         sdxl_unet_id="stabilityai/stable-diffusion-xl-base-1.0", device=device
     )
-    lora_config_D = LoraConfig(
+    lora_config = LoraConfig(
         r=16,
         lora_alpha=16,
         target_modules=[
@@ -184,15 +186,26 @@ def main():
         lora_dropout=0.05,
         bias="none",
     )
-    discriminator = get_peft_model(discriminator, lora_config_D)
+    discriminator = get_peft_model(discriminator, lora_config)
+    discriminator.train()
 
     for name, param in discriminator.named_parameters():
         if "lora_" not in name and "mlp_head" not in name:
             param.requires_grad = False  # only LoRA and MLP is trainable
 
+    generator = get_peft_model(pipe.unet, lora_config)
+    generator.train()
+    generator.requires_grad_(False)
+    unet_lora_state_dict = {}
+
+    for name, param in generator.named_parameters():
+        if "lora_" in name:
+            param.requires_grad = True
+            unet_lora_state_dict[name] = param
+
     # Optimizer & Loss
     optimizer_g = torch.optim.AdamW(
-        list(filter(lambda p: p.requires_grad, pipe.unet.parameters()))
+        list(filter(lambda p: p.requires_grad, generator.parameters()))
         + list(embedding_change.parameters()),
         lr=1e-4,
     )
@@ -215,14 +228,14 @@ def main():
 
     # Accelerator Prepare
     (
-        pipe.unet,
+        generator,
         discriminator,
         embedding_change,
         optimizer_g,
         optimizer_d,
         dataloader,
     ) = accelerator.prepare(
-        pipe.unet,
+        generator,
         discriminator,
         embedding_change,
         optimizer_g,
@@ -290,9 +303,7 @@ def main():
                 prompt_embed = embedding_change(prompt_embed)
                 prompt_embeds.append(prompt_embed)
             prompt_embeds = torch.cat(prompt_embeds)
-            prompt_embeds = F.normalize(
-                prompt_embeds, dim=-1
-            )  # SD text embedding scale 근사
+            prompt_embeds = F.normalize(prompt_embeds, dim=-1)
 
             """
             🍞 Generator Update - - - - - - - - - - - - - - - - - - - -
@@ -308,7 +319,7 @@ def main():
             """
 
             # UNet Inference
-            model_pred = pipe.unet(
+            model_pred = generator(
                 mq_f_latent, timesteps_g, encoder_hidden_states=prompt_embeds
             ).sample
 
@@ -451,23 +462,18 @@ def main():
                 )
                 os.makedirs(ckpt_dir, exist_ok=True)
 
-                # Generator (UNet LoRA)
-                pipe.save_lora_weights(
-                    save_directory=ckpt_dir,
-                    unet_lora_layers=unet_lora_state_dict,
-                    weight_name="unet_lora.safetensors",
+                unwrapped_generator = accelerator.unwrap_model(generator)
+                unwrapped_generator.save_pretrained(
+                    os.path.join(ckpt_dir, "generator_lora")
                 )
 
-                # Embedding Change Module
                 unwrapped_emb_change = accelerator.unwrap_model(embedding_change)
                 torch.save(
                     unwrapped_emb_change.state_dict(),
                     os.path.join(ckpt_dir, "embedding_change.pth"),
                 )
 
-                # Discriminator (PEFT 모델이므로 save_pretrained 지원)
                 unwrapped_discriminator = accelerator.unwrap_model(discriminator)
-                # PEFT 모델은 save_pretrained로 LoRA config와 weight를 같이 저장
                 unwrapped_discriminator.save_pretrained(
                     os.path.join(ckpt_dir, "discriminator_lora")
                 )
