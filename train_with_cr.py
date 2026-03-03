@@ -63,7 +63,7 @@ def parse_args():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="experiments/13",
+        default="experiments/15",
         help="Root directory for saving results",
     )
     parser.add_argument(
@@ -311,16 +311,16 @@ def main():
             optimizer_g.zero_grad()
 
             # Timesteps Sampling
-            timesteps_g = torch.full((bs,), 399, device=device, dtype=torch.long)
-            """
-            timesteps_g = torch.randint(
-                0, 1000, (bs,), device=device, dtype=torch.long
+            # timesteps_g = torch.full((bs,), 399, device=device, dtype=torch.long)
+            timesteps_g = torch.randint(0, 1000, (bs,), device=device, dtype=torch.long)
+            noise = torch.randn_like(mq_f_latent)
+            noisy_mq_f_latent = noise_scheduler.add_noise(
+                mq_f_latent, noise, timesteps_g
             )
-            """
 
             # UNet Inference
             model_pred = generator(
-                mq_f_latent, timesteps_g, encoder_hidden_states=prompt_embeds
+                noisy_mq_f_latent, timesteps_g, encoder_hidden_states=prompt_embeds
             ).sample
 
             # if accelerator.is_main_process:
@@ -328,7 +328,7 @@ def main():
 
             # x0 예측 (Reconstruction)
             x_0_latent = get_x0_from_noise(
-                mq_f_latent,
+                noisy_mq_f_latent,
                 model_pred,
                 noise_scheduler.alphas_cumprod.to(device),
                 timesteps_g,
@@ -437,11 +437,25 @@ def main():
                         vis_restored = process_visual_image(restored_img)
                         vis_gt = process_visual_image(gt)
 
+                        # t에 따라 노이즈가 추가된 입력 MQ-FT 얼굴
+                        noisy_mq_f = vae.decode(
+                            noisy_mq_f_latent / vae.config.scaling_factor
+                        ).sample
+                        vis_noisy_mq_f = process_visual_image(noisy_mq_f)
+
+                        # 모델이 예측한 노이즈 시각화
+                        pred_noise = vae.decode(
+                            model_pred / vae.config.scaling_factor
+                        ).sample
+                        vis_pred_noise = process_visual_image(pred_noise)
+
                         n_save = min(4, bs)
                         grid = torch.cat(
                             [
                                 vis_lq[:n_save],
                                 vis_mq_f[:n_save],
+                                vis_noisy_mq_f[:n_save],
+                                vis_pred_noise[:n_save],
                                 vis_restored[:n_save],
                                 vis_gt[:n_save],
                             ],

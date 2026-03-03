@@ -20,10 +20,15 @@ from diffusers import (
     UNet2DConditionModel,
     StableDiffusionPipeline,
 )
+from safetensors.torch import load_file
 
 from utils.vaehook import perfcount
 from utils.others import get_x0_from_noise
-from models.lq_embed import TwoLayerConv1x1, vqvae_encoder, DualDecoderVQGAN
+from models.lq_embed import vqvae_encoder, TwoLayerConv1x1
+
+from dataset_multipie import MultiPIEValidationDataset, ANGLES_EXTREME, ANGLES_MODERATE
+
+from models.cr.model import CoarseRestorer, DualEncoderCoarseRestorer
 
 
 class OSDFace_test(nn.Module):
@@ -54,14 +59,34 @@ class OSDFace_test(nn.Module):
         self.load_ckpt(args.ckpt_path)
 
         self.img_encoder = vqvae_encoder(args)
-        self.ddvqgan = DualDecoderVQGAN(args.ddvqgan_ckpt_path)
 
         self.unet.to(self.device, dtype=self.weight_dtype)
         self.vae.to(self.device, dtype=self.weight_dtype)
-        self.img_encoder = vqvae_encoder(args).to(self.device, dtype=self.weight_dtype)
-        self.ddvqgan.to(self.device, dtype=self.weight_dtype)
+        self.img_encoder.to(self.device, dtype=self.weight_dtype)
 
         self.timesteps = 399
+
+        self.use_uni = args.use_uni
+
+        # Define CR modules
+        if args.use_uni:
+            self.uni_model = CoarseRestorer(res=128).to(self.device)
+            self.uni_model.load_state_dict(load_file(args.ckpt_uni))
+            self.uni_model.eval()
+        else:
+            self.m2f_model = CoarseRestorer(res=128).to(self.device)
+            self.e2m_model = CoarseRestorer(res=128).to(self.device)
+            self.e2f_model = DualEncoderCoarseRestorer(
+                res=128, fuse_type="addition"
+            ).to(self.device)
+
+            self.m2f_model.load_state_dict(load_file(args.ckpt_e2m))
+            self.e2m_model.load_state_dict(load_file(args.ckpt_e2m))
+            self.e2f_model.load_state_dict(load_file(args.ckpt_e2f))
+
+            self.m2f_model.eval()
+            self.e2m_model.eval()
+            self.e2f_model.eval()
 
     def load_ckpt(self, ckpt_path):
         if not self.args.cat_prompt_embedding:
@@ -88,24 +113,34 @@ class OSDFace_test(nn.Module):
 
     @perfcount
     @torch.no_grad()
-    def forward(self, lq):
+    def forward(self, lq, filename):
+        # lq.shape = (bs, 3, 128, 128), range = [0, 1]
         stream1 = torch.cuda.Stream()
         stream2 = torch.cuda.Stream()
 
-        coarse_ft = self.ddvqgan(lq * 0.5 + 0.5)[1]  # ✅ coarse frontal face
-        coarse_ft = torch.clamp((coarse_ft - 0.5) * 2.0, -1.0, 1.0)  # ⚠️ IMPORTANT
-
-        print("🔥", coarse_ft.shape, coarse_ft.max(), coarse_ft.min())
-        print("❄️", lq.shape, lq.max(), lq.min())
-
         with torch.cuda.stream(stream1):
-            prompt_embeds = self.img_encoder(lq).reshape(1, 77, -1) * 2.0
+            lq_512 = Fun.interpolate(lq, size=(512, 512), mode="bicubic") * 2.0 - 1.0
+            prompt_embeds = self.img_encoder(lq_512).reshape(lq.shape[0], 77, -1)
             if not self.args.cat_prompt_embedding:
                 prompt_embeds = self.embedding_change(prompt_embeds)
 
         with torch.cuda.stream(stream2):
+            if self.use_uni:
+                mq_frontal = self.uni_model(lq)
+            else:
+                POSE_GROUP = "E" if filename[4:8] in ANGLES_EXTREME else "M"
+                if POSE_GROUP == "E":
+                    mq_anchor = self.e2m_model(lq)
+                    mq_frontal = self.e2f_model(lq, mq_anchor)
+                else:
+                    mq_frontal = self.m2f_model(lq)
+
+            # 512*512 크기로 리사이징 및 [-1, 1] 범위로 정규화
+            mq_frontal = Fun.interpolate(mq_frontal, size=(512, 512), mode="bicubic")
+            mq_frontal = (mq_frontal - 0.5) * 2.0
+
             lq_latent = (
-                self.vae.encode(coarse_ft.to(self.weight_dtype)).latent_dist.sample()
+                self.vae.encode(mq_frontal.to(self.weight_dtype)).latent_dist.sample()
                 * self.vae.config.scaling_factor
             )
 
@@ -128,9 +163,8 @@ class OSDFace_test(nn.Module):
             ).sample
         ).clamp(-1, 1)
         output_image = output_image * 0.5 + 0.5
-        coarse_ft_image = coarse_ft * 0.5 + 0.5
 
-        return output_image.clamp(0.0, 1.0), coarse_ft_image.clamp(0.0, 1.0)
+        return output_image.clamp(0.0, 1.0)
 
 
 def main_worker(Unet, rank, gpu_id, image_names, weight_dtype, args):
@@ -143,33 +177,16 @@ def main_worker(Unet, rank, gpu_id, image_names, weight_dtype, args):
         input_image = (
             Image.open(image_name)
             .convert("RGB")
-            .resize(
-                (args.process_size, args.process_size),
-                resample=Image.Resampling.BICUBIC,
-            )
+            .resize((128, 128), resample=Image.Resampling.BICUBIC)
         )
         with torch.no_grad():
-            lq = (
-                (F.to_tensor(input_image) * 2.0 - 1.0)
-                .unsqueeze(0)
-                .to(gpu_id, dtype=weight_dtype)
-            )
-            lq = Fun.interpolate(
-                lq,
-                (args.process_size, args.process_size),
-                mode="bilinear",
-                align_corners=True,
-            )
+            lq = F.to_tensor(input_image).unsqueeze(0).to(gpu_id, dtype=weight_dtype)
 
-            output_image, coarse_ft = model(lq)
-            # concat with original input
-            lq_image = lq * 0.5 + 0.5
-            output_image = torch.cat([lq_image, coarse_ft, output_image], dim=-1)
+            output_image = model(lq, os.path.basename(image_name))
 
             output_pil = transforms.ToPILImage()(output_image[0].cpu())
             output_pil = output_pil.resize(
-                (args.output_size * 3, args.output_size),
-                resample=Image.Resampling.BICUBIC,
+                (args.output_size, args.output_size), resample=Image.Resampling.BICUBIC
             )
             output_pil.save(output_file_path)
 
@@ -211,14 +228,17 @@ def run_inference(args, Unet):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--input_image", "-i", type=str, required=True, help="path to the input image"
+        "--input_image",
+        "-i",
+        type=str,
+        default="../../datasets/multipie_validation_128/lq",
+        help="path to the input image",
     )
     parser.add_argument(
         "--output_dir",
         "-o",
         type=str,
         required=True,
-        default="outputs",
         help="the directory to save the output",
     )
     parser.add_argument(
@@ -231,16 +251,32 @@ if __name__ == "__main__":
     parser.add_argument("--process_size", type=int, default=512)
     parser.add_argument("--output_size", type=int, default=128)
     parser.add_argument("--ckpt_path", type=str, required=True)
+    parser.add_argument("--use_uni", action="store_true", help="use single CR module")
+    parser.add_argument(
+        "--ckpt_uni",
+        type=str,
+        default="../FSRpFT/checkpoints/cr/0A1_uni_pix=1.0_vgg=0.001_adv=0.005_id=0.005/29/model.safetensors",
+    )
+    parser.add_argument(
+        "--ckpt_m2f",
+        type=str,
+        default="../FSRpFT/checkpoints/cr/0A1_uni_pix=1.0_vgg=0.001_adv=0.005_id=0.005/29/model.safetensors",
+    )
+    parser.add_argument(
+        "--ckpt_e2m",
+        type=str,
+        default="../FSRpFT/checkpoints/cr/0A1_uni_pix=1.0_vgg=0.001_adv=0.005_id=0.005/29/model.safetensors",
+    )
+    parser.add_argument(
+        "--ckpt_e2f",
+        type=str,
+        default="../FSRpFT/checkpoints/cr/0A1_uni_pix=1.0_vgg=0.001_adv=0.005_id=0.005/29/model.safetensors",
+    )
     parser.add_argument(
         "--mixed_precision", type=str, choices=["fp16", "fp32"], default="fp32"
     )
     parser.add_argument(
-        "--img_encoder_weight", type=str, default="pretrained/ddvqgan_encoder.ckpt"
-    )
-    parser.add_argument(
-        "--ddvqgan_ckpt_path",
-        type=str,
-        default="pretrained/model.safetensors",
+        "--img_encoder_weight", type=str, default="pretrained/associate_2.ckpt"
     )
     parser.add_argument(
         "--gpu_ids", nargs="+", type=int, default=[0], help="List of GPU IDs to use"

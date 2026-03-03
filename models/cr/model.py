@@ -146,7 +146,7 @@ class CoarseRestorer(nn.Module):
 
 
 class DualEncoderCoarseRestorer(nn.Module):
-    def __init__(self, res=128, in_channels=3, width=64, fuse_type="concat"):
+    def __init__(self, res=128, in_channels=3, width=32, fuse_type="concat"):
         super().__init__()
 
         self.fuse_type = fuse_type

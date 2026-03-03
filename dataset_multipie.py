@@ -253,3 +253,40 @@ class MultiPIEDatasetForInference(Dataset):
 
     def __len__(self):
         return len(self.images)
+
+
+class MultiPIEValidationDataset(Dataset):
+    def __init__(
+        self, dataroot="../../datasets/multipie_validation_128", pose_group="all"
+    ):
+        super().__init__()
+        self.dataroot = os.path.join(dataroot)
+        self.lq_paths = []
+        self.gt_paths = []
+        self.filenames = []
+        self.pose_group = pose_group
+
+        for filename in sorted(os.listdir(os.path.join(self.dataroot, "gt"))):
+            if (
+                self.pose_group == "all"
+                or (self.pose_group == "e" and filename[4:8] in ANGLES_EXTREME)
+                or (self.pose_group == "m" and filename[4:8] in ANGLES_MODERATE)
+            ):
+                lq_path = os.path.join(self.dataroot, "lq", filename)
+                gt_path = os.path.join(self.dataroot, "gt", filename)
+                self.filenames.append(filename)
+
+                self.lq_paths.append(lq_path)
+                self.gt_paths.append(gt_path)
+
+    def __getitem__(self, index):
+        lq_image = Image.open(self.lq_paths[index]).convert("RGB")
+        gt_image = Image.open(self.gt_paths[index]).convert("RGB")
+
+        lq_tensor = to_tensor(lq_image)
+        gt_tensor = to_tensor(gt_image)
+
+        return (lq_tensor, gt_tensor, self.filenames[index])
+
+    def __len__(self):
+        return len(self.gt_paths)
