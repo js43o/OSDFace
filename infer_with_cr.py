@@ -13,7 +13,6 @@ import numpy as np
 from PIL import Image
 from tqdm import tqdm
 import random
-from safetensors import safe_open
 from diffusers import (
     DDIMScheduler,
     AutoencoderKL,
@@ -21,13 +20,13 @@ from diffusers import (
     StableDiffusionPipeline,
 )
 from safetensors.torch import load_file
+from peft import LoraConfig, get_peft_model, set_peft_model_state_dict
 
 from utils.vaehook import perfcount
 from utils.others import get_x0_from_noise
 from models.lq_embed import vqvae_encoder, TwoLayerConv1x1
 
-from dataset_multipie import MultiPIEValidationDataset, ANGLES_EXTREME, ANGLES_MODERATE
-
+from dataset_multipie import ANGLES_EXTREME, ANGLES_MODERATE
 from models.cr.model import CoarseRestorer, DualEncoderCoarseRestorer
 
 
@@ -67,6 +66,7 @@ class OSDFace_test(nn.Module):
         self.timesteps = 399
 
         self.use_uni = args.use_uni
+        self.use_noise = args.use_noise
 
         # Define CR modules
         if args.use_uni:
@@ -74,18 +74,16 @@ class OSDFace_test(nn.Module):
             self.uni_model.load_state_dict(load_file(args.ckpt_uni))
             self.uni_model.eval()
         else:
-            self.m2f_model = CoarseRestorer(res=128).to(self.device)
-            self.e2m_model = CoarseRestorer(res=128).to(self.device)
-            self.e2f_model = DualEncoderCoarseRestorer(
-                res=128, fuse_type="addition"
-            ).to(self.device)
+            self.m2f_model = CoarseRestorer().to(self.device)
+            self.efr_model = CoarseRestorer().to(self.device)
+            self.e2f_model = DualEncoderCoarseRestorer().to(self.device)
 
-            self.m2f_model.load_state_dict(load_file(args.ckpt_e2m))
-            self.e2m_model.load_state_dict(load_file(args.ckpt_e2m))
+            self.m2f_model.load_state_dict(load_file(args.ckpt_m2f))
+            self.efr_model.load_state_dict(load_file(args.ckpt_efr))
             self.e2f_model.load_state_dict(load_file(args.ckpt_e2f))
 
             self.m2f_model.eval()
-            self.e2m_model.eval()
+            self.efr_model.eval()
             self.e2f_model.eval()
 
     def load_ckpt(self, ckpt_path):
@@ -108,7 +106,43 @@ class OSDFace_test(nn.Module):
                 safety_checker=None,
                 feature_extractor=None,
             )
-            pipe.load_lora_weights(ckpt_path, weight_name="unet_lora.safetensors")
+            """
+            pipe.unet = PeftModel.from_pretrained(
+                pipe.unet, os.path.join(ckpt_path, "generator_lora")
+            )
+            pipe.load_lora_weights(
+                os.path.join(ckpt_path, "generator_lora"),
+                adapter_name="adapter_model",
+            )
+            """
+            g_lora_config = LoraConfig(
+                r=32,
+                lora_alpha=64,
+                target_modules=[
+                    "to_q",
+                    "to_k",
+                    "to_v",
+                    "to_out.0",
+                    "ff.net.0.proj",
+                    "ff.net.2",
+                    "conv1",
+                    "conv2",
+                    "conv_shortcut",
+                    "proj_in",
+                    "proj_out",
+                ],
+                lora_dropout=0.05,
+                bias="none",
+            )
+            pipe.unet = get_peft_model(pipe.unet, g_lora_config)
+
+            lora_state_dict = load_file(
+                os.path.join(ckpt_path, "generator_lora", "adapter_model.safetensors")
+            )
+            set_peft_model_state_dict(pipe.unet, lora_state_dict)
+
+            pipe.unet.to(self.device, dtype=self.weight_dtype)
+
             self.unet = pipe.unet
 
     @perfcount
@@ -124,25 +158,42 @@ class OSDFace_test(nn.Module):
             if not self.args.cat_prompt_embedding:
                 prompt_embeds = self.embedding_change(prompt_embeds)
 
+            prompt_embeds = Fun.normalize(prompt_embeds, dim=-1)  # 정규화
+
         with torch.cuda.stream(stream2):
             if self.use_uni:
-                mq_frontal = self.uni_model(lq)
+                hq_f_pred = self.uni_model(lq)
             else:
-                POSE_GROUP = "E" if filename[4:8] in ANGLES_EXTREME else "M"
-                if POSE_GROUP == "E":
-                    mq_anchor = self.e2m_model(lq)
-                    mq_frontal = self.e2f_model(lq, mq_anchor)
+                if filename[4:8] in ANGLES_EXTREME:
+                    hq_e_pred = self.efr_model(lq)
+                    hq_f_pred = self.e2f_model(hq_e_pred, lq)  # reversed order
+                elif filename[4:8] in ANGLES_MODERATE:
+                    hq_f_pred = self.m2f_model(lq)
                 else:
-                    mq_frontal = self.m2f_model(lq)
+                    raise "Exception: unrecognized pose in filename: %s" % filename[4:8]
 
             # 512*512 크기로 리사이징 및 [-1, 1] 범위로 정규화
-            mq_frontal = Fun.interpolate(mq_frontal, size=(512, 512), mode="bicubic")
-            mq_frontal = (mq_frontal - 0.5) * 2.0
+            hq_f_pred = Fun.interpolate(hq_f_pred, size=(512, 512), mode="bicubic")
+            hq_f_pred = (hq_f_pred - 0.5) * 2.0
 
             lq_latent = (
-                self.vae.encode(mq_frontal.to(self.weight_dtype)).latent_dist.sample()
+                self.vae.encode(hq_f_pred.to(self.weight_dtype)).latent_dist.sample()
                 * self.vae.config.scaling_factor
             )
+
+            if self.use_noise:
+                T_L = 200 if filename[4:8] in ANGLES_EXTREME else 100
+                self.timesteps = torch.randint(
+                    0,
+                    T_L,
+                    (lq_latent.shape[0],),
+                    device=lq_latent.device,
+                    dtype=torch.long,
+                )
+                noise = torch.randn_like(lq_latent, device=lq_latent.device)
+                lq_latent = self.noise_scheduler.add_noise(
+                    lq_latent, noise, self.timesteps
+                )
 
         torch.cuda.synchronize()
 
@@ -255,22 +306,22 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ckpt_uni",
         type=str,
-        default="../FSRpFT/checkpoints/cr/0A1_uni_pix=1.0_vgg=0.001_adv=0.005_id=0.005/29/model.safetensors",
+        default="./pretrained/cr/0A1_uni_pix=1.0_vgg=0.001_adv=0.0025_id=0.0025/29/model.safetensors",
     )
     parser.add_argument(
         "--ckpt_m2f",
         type=str,
-        default="../FSRpFT/checkpoints/cr/0A1_uni_pix=1.0_vgg=0.001_adv=0.005_id=0.005/29/model.safetensors",
+        default="./pretrained/cr/0A7_m2f_pix=1.0_vgg=0.001_adv=0.001_id=0.0025/29/model.safetensors",
     )
     parser.add_argument(
-        "--ckpt_e2m",
+        "--ckpt_efr",
         type=str,
-        default="../FSRpFT/checkpoints/cr/0A1_uni_pix=1.0_vgg=0.001_adv=0.005_id=0.005/29/model.safetensors",
+        default="./pretrained/cr/0A2_e2e_pix=1.0_vgg=0.001_id=0.01/29/model.safetensors",
     )
     parser.add_argument(
         "--ckpt_e2f",
         type=str,
-        default="../FSRpFT/checkpoints/cr/0A1_uni_pix=1.0_vgg=0.001_adv=0.005_id=0.005/29/model.safetensors",
+        default="./pretrained/cr/0A41_e2f_pix=1.0_vgg=0.001_adv=0.0025_id=0.0025/29/model.safetensors",
     )
     parser.add_argument(
         "--mixed_precision", type=str, choices=["fp16", "fp32"], default="fp32"
@@ -293,8 +344,13 @@ if __name__ == "__main__":
         "--use_pos_embedding", action="store_true", help="use 2D pos embedding"
     )
     parser.add_argument("--merge_lora", action="store_true", help="merge LoRA weights")
-    parser.add_argument("--lora_rank", type=int, default=16)
-    parser.add_argument("--lora_alpha", type=float, default=16)
+    parser.add_argument("--lora_rank", type=int, default=32)
+    parser.add_argument("--lora_alpha", type=float, default=64)
+    parser.add_argument(
+        "--use_noise",
+        action="store_true",
+        help="whether to add random noise to input LQ image",
+    )
 
     args = parser.parse_args()
     mp.set_start_method("spawn", force=True)
