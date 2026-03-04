@@ -167,7 +167,7 @@ def main():
     discriminator = SDXLPartialDiscriminator(
         sdxl_unet_id="stabilityai/stable-diffusion-xl-base-1.0", device=device
     )
-    lora_config = LoraConfig(
+    d_lora_config = LoraConfig(
         r=16,
         lora_alpha=16,
         target_modules=[
@@ -186,14 +186,33 @@ def main():
         lora_dropout=0.05,
         bias="none",
     )
-    discriminator = get_peft_model(discriminator, lora_config)
+    discriminator = get_peft_model(discriminator, d_lora_config)
     discriminator.train()
 
     for name, param in discriminator.named_parameters():
         if "lora_" not in name and "mlp_head" not in name:
             param.requires_grad = False  # only LoRA and MLP is trainable
 
-    generator = get_peft_model(pipe.unet, lora_config)
+    g_lora_config = LoraConfig(
+        r=32,
+        lora_alpha=64,
+        target_modules=[
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0",
+            "ff.net.0.proj",
+            "ff.net.2",
+            "conv1",
+            "conv2",
+            "conv_shortcut",
+            "proj_in",
+            "proj_out",
+        ],
+        lora_dropout=0.05,
+        bias="none",
+    )
+    generator = get_peft_model(pipe.unet, g_lora_config)
     generator.train()
     generator.requires_grad_(False)
     unet_lora_state_dict = {}
@@ -312,7 +331,7 @@ def main():
 
             # Timesteps Sampling
             # timesteps_g = torch.full((bs,), 399, device=device, dtype=torch.long)
-            timesteps_g = torch.randint(0, 1000, (bs,), device=device, dtype=torch.long)
+            timesteps_g = torch.randint(0, 400, (bs,), device=device, dtype=torch.long)
             noise = torch.randn_like(mq_f_latent)
             noisy_mq_f_latent = noise_scheduler.add_noise(
                 mq_f_latent, noise, timesteps_g
