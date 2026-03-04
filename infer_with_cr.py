@@ -170,7 +170,8 @@ class OSDFace_test(nn.Module):
                 elif filename[4:8] in ANGLES_MODERATE:
                     hq_f_pred = self.m2f_model(lq)
                 else:
-                    raise "Exception: unrecognized pose in filename: %s" % filename[4:8]
+                    hq_f_pred = self.m2f_model(lq)  # use M2F model
+                    # raise "Exception: unrecognized pose in filename: %s" % filename[4:8]
 
             # 512*512 크기로 리사이징 및 [-1, 1] 범위로 정규화
             hq_f_pred = Fun.interpolate(hq_f_pred, size=(512, 512), mode="bicubic")
@@ -182,7 +183,7 @@ class OSDFace_test(nn.Module):
             )
 
             if self.use_noise:
-                T_L = 200 if filename[4:8] in ANGLES_EXTREME else 100
+                T_L = 400
                 self.timesteps = torch.randint(
                     0,
                     T_L,
@@ -223,6 +224,9 @@ def main_worker(Unet, rank, gpu_id, image_names, weight_dtype, args):
 
     model = OSDFace_test(args, gpu_id, Unet).to(gpu_id)
 
+    if args.save_comp:
+        os.makedirs(os.path.join(args.output_dir, "comp"), exist_ok=True)
+
     for image_name in tqdm(image_names):
         output_file_path = os.path.join(args.output_dir, os.path.basename(image_name))
         input_image = (
@@ -240,6 +244,16 @@ def main_worker(Unet, rank, gpu_id, image_names, weight_dtype, args):
                 (args.output_size, args.output_size), resample=Image.Resampling.BICUBIC
             )
             output_pil.save(output_file_path)
+
+            if args.save_comp:
+                comp_pil = Image.new(
+                    "RGB", (input_image.width + output_pil.width, input_image.height)
+                )
+                comp_pil.paste(input_image, (0, 0))
+                comp_pil.paste(output_pil, (input_image.width, 0))
+                comp_pil.save(
+                    os.path.join(args.output_dir, "comp", os.path.basename(image_name))
+                )
 
 
 def run_inference(args, Unet):
@@ -303,6 +317,9 @@ if __name__ == "__main__":
     parser.add_argument("--output_size", type=int, default=128)
     parser.add_argument("--ckpt_path", type=str, required=True)
     parser.add_argument("--use_uni", action="store_true", help="use single CR module")
+    parser.add_argument(
+        "--save_comp", action="store_true", help="save comparision image"
+    )
     parser.add_argument(
         "--ckpt_uni",
         type=str,
