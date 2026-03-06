@@ -105,7 +105,7 @@ def main():
     embedding_change = TwoLayerConv1x1(512, 1024).to(device=device)
     embedding_change.load_state_dict(
         torch.load(
-            os.path.join(args.ckpt_path, "embedding_change_weights.pth"),
+            os.path.join(args.ckpt_path, "embedding_change.pth"),
             weights_only=False,
         )
     )

@@ -20,7 +20,6 @@ from diffusers import (
     StableDiffusionPipeline,
 )
 from safetensors.torch import load_file
-from peft import LoraConfig, get_peft_model, set_peft_model_state_dict
 
 from utils.vaehook import perfcount
 from utils.others import get_x0_from_noise
@@ -40,10 +39,12 @@ class OSDFace_test(nn.Module):
         self.noise_scheduler = DDIMScheduler.from_pretrained(
             args.pretrained_model_name_or_path, subfolder="scheduler"
         )
+
         self.alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(self.device)
         self.vae = AutoencoderKL.from_pretrained(
             self.args.pretrained_model_name_or_path, subfolder="vae"
         )
+
         if args.merge_lora:
             self.unet = copy.deepcopy(Unet)
         else:
@@ -106,43 +107,7 @@ class OSDFace_test(nn.Module):
                 safety_checker=None,
                 feature_extractor=None,
             )
-            """
-            pipe.unet = PeftModel.from_pretrained(
-                pipe.unet, os.path.join(ckpt_path, "generator_lora")
-            )
-            pipe.load_lora_weights(
-                os.path.join(ckpt_path, "generator_lora"),
-                adapter_name="adapter_model",
-            )
-            """
-            g_lora_config = LoraConfig(
-                r=32,
-                lora_alpha=64,
-                target_modules=[
-                    "to_q",
-                    "to_k",
-                    "to_v",
-                    "to_out.0",
-                    "ff.net.0.proj",
-                    "ff.net.2",
-                    "conv1",
-                    "conv2",
-                    "conv_shortcut",
-                    "proj_in",
-                    "proj_out",
-                ],
-                lora_dropout=0.05,
-                bias="none",
-            )
-            pipe.unet = get_peft_model(pipe.unet, g_lora_config)
-
-            lora_state_dict = load_file(
-                os.path.join(ckpt_path, "generator_lora", "adapter_model.safetensors")
-            )
-            set_peft_model_state_dict(pipe.unet, lora_state_dict)
-
-            pipe.unet.to(self.device, dtype=self.weight_dtype)
-
+            pipe.load_lora_weights(ckpt_path, weight_name="unet_lora.safetensors")
             self.unet = pipe.unet
 
     @perfcount
@@ -158,8 +123,6 @@ class OSDFace_test(nn.Module):
             if not self.args.cat_prompt_embedding:
                 prompt_embeds = self.embedding_change(prompt_embeds)
 
-            prompt_embeds = Fun.normalize(prompt_embeds, dim=-1)  # 정규화
-
         with torch.cuda.stream(stream2):
             if self.use_uni:
                 hq_f_pred = self.uni_model(lq)
@@ -170,7 +133,7 @@ class OSDFace_test(nn.Module):
                 elif filename[4:8] in ANGLES_MODERATE:
                     hq_f_pred = self.m2f_model(lq)
                 else:
-                    hq_f_pred = self.m2f_model(lq)  # use M2F model
+                    hq_f_pred = self.m2f_model(lq)  # use M2F model instead
                     # raise "Exception: unrecognized pose in filename: %s" % filename[4:8]
 
             # 512*512 크기로 리사이징 및 [-1, 1] 범위로 정규화
@@ -255,11 +218,30 @@ def main_worker(Unet, rank, gpu_id, image_names, weight_dtype, args):
             output_pil.save(output_file_path)
 
             if args.save_comp:
+                """
+                cr_pil = transforms.ToPILImage()(cr_image[0].cpu())
+                cr_pil = cr_pil.resize(
+                    (args.output_size, args.output_size),
+                    resample=Image.Resampling.BICUBIC,
+                )
+                """
+                input_image = input_image.resize(
+                    (args.output_size, args.output_size),
+                    resample=Image.Resampling.NEAREST,
+                )
+
                 comp_pil = Image.new(
-                    "RGB", (input_image.width + output_pil.width, input_image.height)
+                    "RGB",
+                    (
+                        input_image.width
+                        + output_pil.width,  # cr_pil.width + output_pil.width,
+                        input_image.height,
+                    ),
                 )
                 comp_pil.paste(input_image, (0, 0))
                 comp_pil.paste(output_pil, (input_image.width, 0))
+                # comp_pil.paste(cr_pil, (input_image.width, 0))
+                # comp_pil.paste(output_pil, (input_image.width + cr_pil.width, 0))
                 comp_pil.save(
                     os.path.join(args.output_dir, "comp", os.path.basename(image_name))
                 )
@@ -323,7 +305,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--seed", type=int, default=114, help="Random seed to be used")
     parser.add_argument("--process_size", type=int, default=512)
-    parser.add_argument("--output_size", type=int, default=128)
+    parser.add_argument("--output_size", type=int, default=512)
     parser.add_argument("--ckpt_path", type=str, required=True)
     parser.add_argument("--use_uni", action="store_true", help="use single CR module")
     parser.add_argument(
