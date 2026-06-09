@@ -9,7 +9,6 @@ from torch.utils.data import Dataset
 from torchvision.transforms.functional import to_tensor
 
 from basicsr.data import degradations as degradations
-from basicsr.data.transforms import augment
 from basicsr.utils import img2tensor
 
 LIGHT_COND = ["%02d" % i for i in range(20)]
