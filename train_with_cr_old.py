@@ -34,14 +34,14 @@ def parse_args():
         type=str,
         default="Manojb/stable-diffusion-2-1-base",
     )
-    parser.add_argument("--seed", type=int, default=114)
-    parser.add_argument("--max_epoch", type=int, default=15)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--max_epoch", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument(
         "--lambda_adv", type=float, default=1e-2, help="Adversarial loss weight"
     )
     parser.add_argument(
-        "--lambda_id", type=float, default=1e-1, help="Identity loss weight"
+        "--lambda_id", type=float, default=5e-1, help="Identity loss weight"
     )
     parser.add_argument("--ckpt_path", type=str, default="pretrained")
     parser.add_argument(
@@ -63,7 +63,7 @@ def parse_args():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="experiments/16",
+        default="experiments/04_input-id-loss_5e-1",
         help="Root directory for saving results",
     )
     parser.add_argument(
@@ -301,8 +301,10 @@ def main():
             optimizer_g.zero_grad()
 
             # Timesteps Sampling
-            # timesteps_g = torch.full((bs,), 399, device=device, dtype=torch.long)
-            timesteps_g = torch.randint(0, 400, (bs,), device=device, dtype=torch.long)
+            timesteps_g = torch.full((bs,), 399, device=device, dtype=torch.long)
+            # timesteps_g = torch.randint(0, 400, (bs,), device=device, dtype=torch.long)
+
+            """ 명시적인 노이즈 추가 (옵션)
             noise = torch.randn_like(mq_f_latent)
             noisy_mq_f_latent = noise_scheduler.add_noise(
                 mq_f_latent, noise, timesteps_g
@@ -312,13 +314,18 @@ def main():
             model_pred = pipe.unet(
                 noisy_mq_f_latent, timesteps_g, encoder_hidden_states=prompt_embeds
             ).sample
+            """
+
+            model_pred = pipe.unet(
+                mq_f_latent, timesteps_g, encoder_hidden_states=prompt_embeds
+            ).sample
 
             # if accelerator.is_main_process:
             #     print("🚩 2.", model_pred.min(), model_pred.max())
 
             # x0 예측 (Reconstruction)
             x_0_latent = get_x0_from_noise(
-                noisy_mq_f_latent,
+                mq_f_latent,
                 model_pred,
                 noise_scheduler.alphas_cumprod.to(device),
                 timesteps_g,
@@ -331,7 +338,10 @@ def main():
             #     print("🚩 3.", restored_img.min(), restored_img.max())
 
             # Identity Features
-            gt_feature = id_model(process_arcface_input(gt))
+            # gt_feature = id_model(process_arcface_input(gt))
+
+            # 🔥 GT 대신 1차 복원 이미지로 ID Loss 계산
+            mq_feature = id_model(process_arcface_input(mq_f))
             restored_feature = id_model(process_arcface_input(restored_img))
             ID_TARGET = torch.ones((bs,), device=device)
 
@@ -339,7 +349,7 @@ def main():
             loss_cons = (
                 criterion_mse(restored_img, gt)
                 + criterion_perceptual(restored_img, gt)
-                + criterion_id(restored_feature, gt_feature, ID_TARGET) * args.lambda_id
+                + criterion_id(restored_feature, mq_feature, ID_TARGET) * args.lambda_id
             )
 
             # Noise Sampling for Discriminator
@@ -427,11 +437,13 @@ def main():
                         vis_restored = process_visual_image(restored_img)
                         vis_gt = process_visual_image(gt)
 
+                        """
                         # t에 따라 노이즈가 추가된 입력 MQ-FT 얼굴
                         noisy_mq_f = vae.decode(
                             noisy_mq_f_latent / vae.config.scaling_factor
                         ).sample
                         vis_noisy_mq_f = process_visual_image(noisy_mq_f)
+                        """
 
                         # 모델이 예측한 노이즈 시각화
                         pred_noise = vae.decode(
@@ -444,7 +456,7 @@ def main():
                             [
                                 vis_lq[:n_save],
                                 vis_mq_f[:n_save],
-                                vis_noisy_mq_f[:n_save],
+                                # vis_noisy_mq_f[:n_save],
                                 vis_pred_noise[:n_save],
                                 vis_restored[:n_save],
                                 vis_gt[:n_save],

@@ -188,4 +188,4 @@ _*.txt
 *.jpg
 *.jpeg
 
-old/
+_old/
