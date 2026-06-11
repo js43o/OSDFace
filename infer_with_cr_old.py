@@ -122,6 +122,7 @@ class OSDFace_test(nn.Module):
             prompt_embeds = self.img_encoder(lq_512).reshape(lq.shape[0], 77, -1)
             if not self.args.cat_prompt_embedding:
                 prompt_embeds = self.embedding_change(prompt_embeds)
+            prompt_embeds = Fun.normalize(prompt_embeds, dim=-1)
 
         with torch.cuda.stream(stream2):
             if self.use_uni:
@@ -137,11 +138,11 @@ class OSDFace_test(nn.Module):
                     # raise "Exception: unrecognized pose in filename: %s" % filename[4:8]
 
             # 512*512 크기로 리사이징 및 [-1, 1] 범위로 정규화
-            hq_f_pred = Fun.interpolate(hq_f_pred, size=(512, 512), mode="bicubic")
-            hq_f_pred = (hq_f_pred - 0.5) * 2.0
+            hq_f_resized = Fun.interpolate(hq_f_pred, size=(512, 512), mode="bicubic")
+            hq_f_resized = (hq_f_resized - 0.5) * 2.0
 
             lq_latent = (
-                self.vae.encode(hq_f_pred.to(self.weight_dtype)).latent_dist.sample()
+                self.vae.encode(hq_f_resized.to(self.weight_dtype)).latent_dist.sample()
                 * self.vae.config.scaling_factor
             )
 
@@ -188,7 +189,7 @@ class OSDFace_test(nn.Module):
         ).clamp(-1, 1)
         output_image = output_image * 0.5 + 0.5
 
-        return output_image.clamp(0.0, 1.0)
+        return output_image.clamp(0.0, 1.0), hq_f_pred
 
 
 def main_worker(Unet, rank, gpu_id, image_names, weight_dtype, args):
@@ -196,11 +197,13 @@ def main_worker(Unet, rank, gpu_id, image_names, weight_dtype, args):
 
     model = OSDFace_test(args, gpu_id, Unet).to(gpu_id)
 
+    if args.save_cr:
+        os.makedirs(os.path.join(args.output_dir, "cr"), exist_ok=True)
+
     if args.save_comp:
         os.makedirs(os.path.join(args.output_dir, "comp"), exist_ok=True)
 
     for image_name in tqdm(image_names):
-        output_file_path = os.path.join(args.output_dir, os.path.basename(image_name))
         input_image = (
             Image.open(image_name)
             .convert("RGB")
@@ -209,39 +212,43 @@ def main_worker(Unet, rank, gpu_id, image_names, weight_dtype, args):
         with torch.no_grad():
             lq = F.to_tensor(input_image).unsqueeze(0).to(gpu_id, dtype=weight_dtype)
 
-            output_image = model(lq, os.path.basename(image_name))
+            output_image, hq_f_pred = model(lq, os.path.basename(image_name))
+
+            cr_pil = transforms.ToPILImage()(hq_f_pred[0].cpu())
+            cr_pil = cr_pil.resize(
+                (args.output_size, args.output_size),
+                resample=Image.Resampling.BICUBIC,
+            )
 
             output_pil = transforms.ToPILImage()(output_image[0].cpu())
             output_pil = output_pil.resize(
                 (args.output_size, args.output_size), resample=Image.Resampling.BICUBIC
             )
-            output_pil.save(output_file_path)
+
+            output_pil.save(os.path.join(args.output_dir, os.path.basename(image_name)))
+
+            if args.save_cr:
+                cr_pil.save(
+                    os.path.join(args.output_dir, "cr", os.path.basename(image_name))
+                )
 
             if args.save_comp:
-                """
-                cr_pil = transforms.ToPILImage()(cr_image[0].cpu())
-                cr_pil = cr_pil.resize(
+                lq_pil = input_image.resize(
                     (args.output_size, args.output_size),
                     resample=Image.Resampling.BICUBIC,
                 )
-                """
-                input_image = input_image.resize(
-                    (args.output_size, args.output_size),
-                    resample=Image.Resampling.NEAREST,
-                )
-
                 comp_pil = Image.new(
                     "RGB",
                     (
-                        input_image.width
+                        lq_pil.width
                         + output_pil.width,  # cr_pil.width + output_pil.width,
-                        input_image.height,
+                        lq_pil.height,
                     ),
                 )
-                comp_pil.paste(input_image, (0, 0))
-                comp_pil.paste(output_pil, (input_image.width, 0))
-                # comp_pil.paste(cr_pil, (input_image.width, 0))
-                # comp_pil.paste(output_pil, (input_image.width + cr_pil.width, 0))
+                comp_pil.paste(lq_pil, (0, 0))
+                comp_pil.paste(output_pil, (lq_pil.width, 0))
+                # comp_pil.paste(cr_pil, (lq_pil.width, 0))
+                # comp_pil.paste(output_pil, (lq_pil.width + cr_pil.width, 0))
                 comp_pil.save(
                     os.path.join(args.output_dir, "comp", os.path.basename(image_name))
                 )
@@ -287,7 +294,7 @@ if __name__ == "__main__":
         "--input_image",
         "-i",
         type=str,
-        default="../../datasets/multipie_validation_128/lq",
+        default="../../datasets/multipie_validation_128_v2/lq",
         help="path to the input image",
     )
     parser.add_argument(
@@ -305,12 +312,9 @@ if __name__ == "__main__":
     )
     parser.add_argument("--seed", type=int, default=114, help="Random seed to be used")
     parser.add_argument("--process_size", type=int, default=512)
-    parser.add_argument("--output_size", type=int, default=512)
+    parser.add_argument("--output_size", type=int, default=128)
     parser.add_argument("--ckpt_path", type=str, required=True)
     parser.add_argument("--use_uni", action="store_true", help="use single CR module")
-    parser.add_argument(
-        "--save_comp", action="store_true", help="save comparision image"
-    )
     parser.add_argument(
         "--ckpt_uni",
         type=str,
@@ -359,6 +363,12 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help='Add random noise to input LQ image (single number or "start:end")',
+    )
+    parser.add_argument(
+        "--save_cr", action="store_true", help="save coarse frontal HQ image"
+    )
+    parser.add_argument(
+        "--save_comp", action="store_true", help="save comparision image"
     )
 
     args = parser.parse_args()
