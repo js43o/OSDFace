@@ -310,7 +310,7 @@ if __name__ == "__main__":
         default="Manojb/stable-diffusion-2-1-base",
         help="sd model path",
     )
-    parser.add_argument("--seed", type=int, default=114, help="Random seed to be used")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed to be used")
     parser.add_argument("--process_size", type=int, default=512)
     parser.add_argument("--output_size", type=int, default=128)
     parser.add_argument("--ckpt_path", type=str, required=True)

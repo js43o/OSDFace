@@ -30,7 +30,7 @@ def parse_args():
         type=str,
         default="Manojb/stable-diffusion-2-1-base",
     )
-    parser.add_argument("--seed", type=int, default=114)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max_epoch", type=int, default=16)
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument(
@@ -59,7 +59,7 @@ def parse_args():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="experiments/09",
+        default="experiments/00_osdface",
         help="Root directory for saving results",
     )
     parser.add_argument(
@@ -125,7 +125,7 @@ def main():
         safety_checker=None,
         feature_extractor=None,
     )
-    pipe.load_lora_weights(args.ckpt_path)
+    pipe.load_lora_weights(args.ckpt_path, weight_name="unet_lora.safetensors")
     pipe.unet.train()
     pipe.unet.requires_grad_(False)
 
@@ -189,7 +189,7 @@ def main():
 
     # DataLoader
     dataset = MultiPIEDataset(
-        "../../datasets/multipie_crop_patch_v2", pase="train", size=512, use_blind=True
+        "../../datasets/multipie_crop_patch_v2", phase="train", size=512, use_blind=True
     )
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
 
@@ -220,7 +220,7 @@ def main():
 
     # 🔥 start training loop
     for epoch in range(args.max_epoch):
-        for idx, (lq, gt) in enumerate(dataloader):
+        for idx, (lq, gt, _filename) in enumerate(dataloader):
             # [-1, 1] 범위로 정규화
             lq = (lq - 0.5) * 2.0
             gt = (gt - 0.5) * 2.0
