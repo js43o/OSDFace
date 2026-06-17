@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from torch.nn.functional import interpolate
 from torchvision.utils import make_grid, save_image
 from diffusers import (
     DDIMScheduler,
@@ -14,6 +15,7 @@ from diffusers import (
 )
 from accelerate import Accelerator
 from peft import LoraConfig, get_peft_model
+from safetensors.torch import load_file
 
 from dataset_multipie import MultiPIEDataset
 from models.lq_embed import TwoLayerConv1x1, vqvae_encoder
@@ -21,6 +23,9 @@ from models.arcface.models import resnet_face18
 from discriminator import SDXLPartialDiscriminator
 from utils.others import get_x0_from_noise, process_arcface_input, process_visual_image
 from edge_aware_dists_demo import EdgeAwareDISTSLoss
+
+from models.cr.model import CoarseRestorer
+from models.common import LatentResidualAdapter
 
 
 def parse_args():
@@ -30,8 +35,8 @@ def parse_args():
         type=str,
         default="Manojb/stable-diffusion-2-1-base",
     )
-    parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--max_epoch", type=int, default=16)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--max_epoch", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=3)
     parser.add_argument(
         "--lambda_adv", type=float, default=1e-2, help="Adversarial loss weight"
@@ -59,7 +64,7 @@ def parse_args():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="experiments/00_osdface_try3",
+        default="experiments/08_fusion_adapter",
         help="Root directory for saving results",
     )
     parser.add_argument(
@@ -115,6 +120,19 @@ def main():
     img_encoder.requires_grad_(False)
     img_encoder.eval()
 
+    cr_modules = []
+    for i in range(5):
+        cr_module = CoarseRestorer(width=32).to(device=device)
+        cr_module.load_state_dict(
+            load_file(
+                "pretrained/cr_split/%s:%s/model.safetensors" % (i * 40, i * 40 + 40)
+            ),
+            strict=False,
+        )
+        cr_module.requires_grad_(False)
+        cr_module.eval()
+        cr_modules.append(cr_module)
+
     # SD Pipeline with LoRA
     pipe = StableDiffusionPipeline(
         vae=vae,
@@ -150,7 +168,7 @@ def main():
     discriminator = SDXLPartialDiscriminator(
         sdxl_unet_id="stabilityai/stable-diffusion-xl-base-1.0", device=device
     )
-    lora_config_D = LoraConfig(
+    d_lora_config = LoraConfig(
         r=16,
         lora_alpha=16,
         target_modules=[
@@ -169,7 +187,11 @@ def main():
         lora_dropout=0.05,
         bias="none",
     )
-    discriminator = get_peft_model(discriminator, lora_config_D)
+    discriminator = get_peft_model(discriminator, d_lora_config)
+    discriminator.train()
+
+    # 🔥 MQ & LQ Fusion Module
+    fusion_adapter = LatentResidualAdapter().to(device=device)
 
     for name, param in discriminator.named_parameters():
         if "lora_" not in name and "mlp_head" not in name:
@@ -177,7 +199,10 @@ def main():
 
     # Optimizer & Loss
     optimizer_g = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, pipe.unet.parameters()), lr=1e-4
+        list(filter(lambda p: p.requires_grad, pipe.unet.parameters()))
+        + list(embedding_change.parameters())
+        + list(fusion_adapter.parameters()),
+        lr=1e-4,
     )
     optimizer_d = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, discriminator.parameters()), lr=1e-4
@@ -189,7 +214,10 @@ def main():
 
     # DataLoader
     dataset = MultiPIEDataset(
-        "../../datasets/multipie_crop_patch_v2", phase="train", size=512, use_blind=True
+        "/vcl4/Jiseung/datasets/multipie_crop_patch_v2",
+        phase="train",
+        size=512,
+        use_blind=True,
     )
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
 
@@ -198,6 +226,7 @@ def main():
         pipe.unet,
         discriminator,
         embedding_change,
+        fusion_adapter,
         optimizer_g,
         optimizer_d,
         dataloader,
@@ -205,6 +234,7 @@ def main():
         pipe.unet,
         discriminator,
         embedding_change,
+        fusion_adapter,
         optimizer_g,
         optimizer_d,
         dataloader,
@@ -220,9 +250,23 @@ def main():
 
     # 🔥 start training loop
     for epoch in range(args.max_epoch):
-        for idx, (lq, gt, _filename) in enumerate(dataloader):
+        for idx, (lq, gt, filename) in enumerate(dataloader):
+            bs = gt.shape[0]
+            lq_resized = interpolate(lq, size=(128, 128), mode="bicubic")
+
+            cr_out_list = []
+            for b in range(lq_resized.shape[0]):
+                pid = int(filename[b][:3])
+                cr_idx = min(pid // 40, len(cr_modules) - 1)
+                cr_out_b = cr_modules[cr_idx](lq_resized[b].unsqueeze(0))
+                cr_out_list.append(cr_out_b)
+
+            cr_out = torch.cat(cr_out_list, dim=0)
+            mq = interpolate(cr_out, size=(512, 512), mode="bicubic")
+
             # [-1, 1] 범위로 정규화
             lq = (lq - 0.5) * 2.0
+            mq = (mq - 0.5) * 2.0
             gt = (gt - 0.5) * 2.0
 
             # VAE Encoding
@@ -231,10 +275,17 @@ def main():
                     vae.encode(lq.to(dtype=weight_dtype)).latent_dist.sample()
                     * vae.config.scaling_factor
                 )
+                mq_latent = (
+                    vae.encode(mq.to(dtype=weight_dtype)).latent_dist.sample()
+                    * vae.config.scaling_factor
+                )
                 gt_latent = (
                     vae.encode(gt.to(dtype=weight_dtype)).latent_dist.sample()
                     * vae.config.scaling_factor
                 )
+
+            # 🔥 fused MQ & LQ
+            fused_latent = fusion_adapter(mq_latent, lq_latent)
 
             # Prompt Embedding
             prompt_embeds = []
@@ -251,23 +302,16 @@ def main():
             optimizer_g.zero_grad()
 
             # Timesteps Sampling
-            timesteps_g = torch.full(
-                (args.batch_size,), 399, device=device, dtype=torch.long
-            )
-            """
-            timesteps_g = torch.randint(
-                0, 1000, (args.batch_size,), device=device, dtype=torch.long
-            )
-            """
+            timesteps_g = torch.full((bs,), 399, device=device, dtype=torch.long)
+            # timesteps_g = torch.randint(0, 400, (bs,), device=device, dtype=torch.long)
 
-            # UNet Inference
             model_pred = pipe.unet(
-                lq_latent, timesteps_g, encoder_hidden_states=prompt_embeds
+                fused_latent, timesteps_g, encoder_hidden_states=prompt_embeds
             ).sample
 
             # x0 예측 (Reconstruction)
             x_0_latent = get_x0_from_noise(
-                lq_latent,
+                fused_latent,
                 model_pred,
                 noise_scheduler.alphas_cumprod.to(device),
                 timesteps_g,
@@ -278,8 +322,9 @@ def main():
 
             # Identity Features
             gt_feature = id_model(process_arcface_input(gt))
+            mq_feature = id_model(process_arcface_input(mq))
             restored_feature = id_model(process_arcface_input(restored_img))
-            ID_TARGET = torch.ones((args.batch_size,), device=device)
+            ID_TARGET = torch.ones((bs,), device=device)
 
             # Consistency Loss
             loss_cons = (
@@ -289,25 +334,21 @@ def main():
             )
 
             # Noise Sampling for Discriminator
-            D_t = torch.randint(
-                0, 1000, (args.batch_size,), device=device, dtype=torch.long
-            )
+            D_t = torch.randint(0, 1000, (bs,), device=device, dtype=torch.long)
             noise_fake = torch.randn_like(x_0_latent)
             z_hat_t = noise_scheduler.add_noise(x_0_latent, noise_fake, D_t)
 
             # SDXL용 더미 데이터
             prompt_embeds_sdxl = torch.zeros(
-                args.batch_size, 77, 2048, device=device, dtype=weight_dtype
+                bs, 77, 2048, device=device, dtype=weight_dtype
             )
             added_cond_kwargs = {
-                "text_embeds": torch.zeros(
-                    args.batch_size, 1280, device=device, dtype=weight_dtype
-                ),
+                "text_embeds": torch.zeros(bs, 1280, device=device, dtype=weight_dtype),
                 "time_ids": torch.tensor(
                     [[1024.0, 1024.0, 0.0, 0.0, 1024.0, 1024.0]],
                     device=device,
                     dtype=weight_dtype,
-                ).repeat(args.batch_size, 1),
+                ).repeat(bs, 1),
             }
 
             logits_fake_for_g = discriminator(
@@ -373,12 +414,25 @@ def main():
 
                     with torch.no_grad():
                         vis_lq = process_visual_image(lq)
-                        vis_gt = process_visual_image(gt)
+                        vis_mq = process_visual_image(mq)
                         vis_restored = process_visual_image(restored_img)
+                        vis_gt = process_visual_image(gt)
 
-                        n_save = min(4, args.batch_size)
+                        # 모델이 예측한 노이즈 시각화
+                        pred_noise = vae.decode(
+                            model_pred / vae.config.scaling_factor
+                        ).sample
+                        vis_pred_noise = process_visual_image(pred_noise)
+
+                        n_save = min(4, bs)
                         grid = torch.cat(
-                            [vis_lq[:n_save], vis_restored[:n_save], vis_gt[:n_save]],
+                            [
+                                vis_lq[:n_save],
+                                vis_mq[:n_save],
+                                vis_pred_noise[:n_save],
+                                vis_restored[:n_save],
+                                vis_gt[:n_save],
+                            ],
                             dim=-1,
                         )
 
@@ -403,16 +457,20 @@ def main():
                     weight_name="unet_lora.safetensors",
                 )
 
-                # Embedding Change Module
                 unwrapped_emb_change = accelerator.unwrap_model(embedding_change)
                 torch.save(
                     unwrapped_emb_change.state_dict(),
                     os.path.join(ckpt_dir, "embedding_change.pth"),
                 )
 
-                # Discriminator (PEFT 모델이므로 save_pretrained 지원)
+                # 🔥 fusion adapter 가중치 저장
+                unwrapped_fusion_adapter = accelerator.unwrap_model(fusion_adapter)
+                torch.save(
+                    unwrapped_fusion_adapter.state_dict(),
+                    os.path.join(ckpt_dir, "fusion_adapter.pth"),
+                )
+
                 unwrapped_discriminator = accelerator.unwrap_model(discriminator)
-                # PEFT 모델은 save_pretrained로 LoRA config와 weight를 같이 저장
                 unwrapped_discriminator.save_pretrained(
                     os.path.join(ckpt_dir, "discriminator_lora")
                 )

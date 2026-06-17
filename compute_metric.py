@@ -19,7 +19,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument(
     "--comp_path",
     type=str,
-    default="outputs/00_osdface/epoch_02",
+    default="outputs/06_no-id/epoch_01",
 )
 parser.add_argument(
     "--gt_path",
@@ -196,21 +196,20 @@ for idx, filename in enumerate(tqdm(gt_filenames)):
     shutil.copy(gt_filepath, os.path.join(TEMP_DIR, "gt", filename))
     shutil.copy(comp_filepath, os.path.join(TEMP_DIR, "comp", filename))
 
-fid = get_fid(os.path.join(TEMP_DIR, "gt"), os.path.join(TEMP_DIR, "comp"))
+fid = get_fid(os.path.join(TEMP_DIR, "gt"), os.path.join(TEMP_DIR, "comp")).item()
 
-scores = {
-    "PSNR": psnr / len(gt_filenames),
-    "SSIM": ssim / len(gt_filenames),
-    "LPIPS": lpips / len(gt_filenames),
-    "NIQE": niqe / len(gt_filenames),
-    "MUSIQ": musiq / len(gt_filenames),
-    "FID (HQ)": fid.item(),
-    "IDS": ids / len(gt_filenames),
-    "LMD": lmd / lmd_count,
-}
-results = ["%s=%s" % (k, v) for k, v in scores.items()]
+scores = [
+    "%.4f" % (psnr / len(gt_filenames)),
+    "%.4f" % (ssim / len(gt_filenames)),
+    "%.4f" % (lpips / len(gt_filenames)),
+    "%.4f" % (niqe / len(gt_filenames)),
+    "%.4f" % (musiq / len(gt_filenames)),
+    "%.4f" % fid,
+    "%.4f" % (ids / len(gt_filenames)),
+    "%.4f" % (lmd / lmd_count,),
+]
 
 print("✅ Done!")
-print("\n".join(results))
+print("\n".join(scores))
 
 shutil.rmtree(TEMP_DIR)

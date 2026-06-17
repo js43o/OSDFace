@@ -58,3 +58,23 @@ class SimpleGate(nn.Module):
     def forward(self, x):
         x1, x2 = x.chunk(2, dim=1)
         return x1 * x2
+
+
+class LatentResidualAdapter(nn.Module):
+    def __init__(self, in_channels=8, hidden_channels=32, out_channels=4):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, hidden_channels, 3, padding=1),
+            nn.SiLU(),
+            nn.Conv2d(hidden_channels, hidden_channels, 3, padding=1),
+            nn.SiLU(),
+            nn.Conv2d(hidden_channels, out_channels, 3, padding=1),
+        )
+
+        # 중요: 처음에는 delta = 0에 가깝게 시작
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, mq_latent, lq_latent):
+        delta = self.net(torch.cat([mq_latent, lq_latent], dim=1))
+        return mq_latent + delta
