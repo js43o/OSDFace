@@ -36,7 +36,7 @@ def parse_args():
         default="Manojb/stable-diffusion-2-1-base",
     )
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--max_epoch", type=int, default=10)
+    parser.add_argument("--max_epoch", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=3)
     parser.add_argument(
         "--lambda_adv", type=float, default=1e-2, help="Adversarial loss weight"
@@ -64,13 +64,13 @@ def parse_args():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="experiments/08_fusion_adapter",
+        default="experiments/09_direct_fusion",
         help="Root directory for saving results",
     )
     parser.add_argument(
         "--save_image_steps",
         type=int,
-        default=200,
+        default=100,
         help="Interval to save image samples",
     )
     parser.add_argument(
@@ -254,15 +254,16 @@ def main():
             bs = gt.shape[0]
             lq_resized = interpolate(lq, size=(128, 128), mode="bicubic")
 
-            cr_out_list = []
-            for b in range(lq_resized.shape[0]):
-                pid = int(filename[b][:3])
-                cr_idx = min(pid // 40, len(cr_modules) - 1)
-                cr_out_b = cr_modules[cr_idx](lq_resized[b].unsqueeze(0))
-                cr_out_list.append(cr_out_b)
+            with torch.no_grad():
+                cr_out_list = []
+                for b in range(lq_resized.shape[0]):
+                    pid = int(filename[b][:3])
+                    cr_idx = min(pid // 40, len(cr_modules) - 1)
+                    cr_out_b = cr_modules[cr_idx](lq_resized[b].unsqueeze(0))
+                    cr_out_list.append(cr_out_b)
 
-            cr_out = torch.cat(cr_out_list, dim=0)
-            mq = interpolate(cr_out, size=(512, 512), mode="bicubic")
+                cr_out = torch.cat(cr_out_list, dim=0)
+                mq = interpolate(cr_out, size=(512, 512), mode="bicubic")
 
             # [-1, 1] 범위로 정규화
             lq = (lq - 0.5) * 2.0
@@ -321,8 +322,10 @@ def main():
             restored_img = vae.decode(x_0_latent / vae.config.scaling_factor).sample
 
             # Identity Features
-            gt_feature = id_model(process_arcface_input(gt))
-            mq_feature = id_model(process_arcface_input(mq))
+            with torch.no_grad():
+                gt_feature = id_model(process_arcface_input(gt))
+                # mq_feature = id_model(process_arcface_input(mq))
+
             restored_feature = id_model(process_arcface_input(restored_img))
             ID_TARGET = torch.ones((bs,), device=device)
 
@@ -413,8 +416,13 @@ def main():
                     os.makedirs(save_dir, exist_ok=True)
 
                     with torch.no_grad():
+                        fused_img = vae.decode(
+                            fused_latent / vae.config.scaling_factor
+                        ).sample
+
                         vis_lq = process_visual_image(lq)
                         vis_mq = process_visual_image(mq)
+                        vis_fused_img = process_visual_image(fused_img)
                         vis_restored = process_visual_image(restored_img)
                         vis_gt = process_visual_image(gt)
 
@@ -429,6 +437,7 @@ def main():
                             [
                                 vis_lq[:n_save],
                                 vis_mq[:n_save],
+                                vis_fused_img[:n_save],
                                 vis_pred_noise[:n_save],
                                 vis_restored[:n_save],
                                 vis_gt[:n_save],

@@ -247,15 +247,16 @@ def main():
             bs = gt.shape[0]
             lq_resized = interpolate(lq, size=(128, 128), mode="bicubic")
 
-            cr_out_list = []
-            for b in range(lq_resized.shape[0]):
-                pid = int(filename[b][:3])
-                cr_idx = min(pid // 40, len(cr_modules) - 1)
-                cr_out_b = cr_modules[cr_idx](lq_resized[b].unsqueeze(0))
-                cr_out_list.append(cr_out_b)
+            with torch.no_grad():
+                cr_out_list = []
+                for b in range(lq_resized.shape[0]):
+                    pid = int(filename[b][:3])
+                    cr_idx = min(pid // 40, len(cr_modules) - 1)
+                    cr_out_b = cr_modules[cr_idx](lq_resized[b].unsqueeze(0))
+                    cr_out_list.append(cr_out_b)
 
-            cr_out = torch.cat(cr_out_list, dim=0)
-            mq_f = interpolate(cr_out, size=(512, 512), mode="bicubic")
+                cr_out = torch.cat(cr_out_list, dim=0)
+                mq_f = interpolate(cr_out, size=(512, 512), mode="bicubic")
 
             # [-1, 1] 범위로 정규화
             lq = (lq - 0.5) * 2.0
@@ -338,10 +339,10 @@ def main():
             #     print("🚩 3.", restored_img.min(), restored_img.max())
 
             # Identity Features
-            # gt_feature = id_model(process_arcface_input(gt))
+            with torch.no_grad():
+                mq_feature = id_model(process_arcface_input(mq_f))
+                # gt_feature = id_model(process_arcface_input(gt))
 
-            # 🔥 GT 대신 1차 복원 이미지로 ID Loss 계산
-            mq_feature = id_model(process_arcface_input(mq_f))
             restored_feature = id_model(process_arcface_input(restored_img))
             ID_TARGET = torch.ones((bs,), device=device)
 

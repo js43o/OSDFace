@@ -19,7 +19,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument(
     "--comp_path",
     type=str,
-    default="outputs/06_no-id/epoch_01",
+    default="outputs/05_dual-id/epoch_03",
 )
 parser.add_argument(
     "--gt_path",

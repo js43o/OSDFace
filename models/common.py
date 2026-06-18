@@ -60,6 +60,8 @@ class SimpleGate(nn.Module):
         return x1 * x2
 
 
+"""
+# 🔥 exp_08 (fusion_adapter)
 class LatentResidualAdapter(nn.Module):
     def __init__(self, in_channels=8, hidden_channels=32, out_channels=4):
         super().__init__()
@@ -78,3 +80,35 @@ class LatentResidualAdapter(nn.Module):
     def forward(self, mq_latent, lq_latent):
         delta = self.net(torch.cat([mq_latent, lq_latent], dim=1))
         return mq_latent + delta
+"""
+
+
+# 🔥 exp_09 (direct_fusion)
+class LatentResidualAdapter(nn.Module):
+    def __init__(self, hidden_channels=32, alpha=0.8, delta_scale=0.1, delta_bound=3.0):
+        super().__init__()
+        self.alpha = alpha
+        self.delta_scale = delta_scale
+        self.delta_bound = delta_bound
+
+        self.net = nn.Sequential(
+            nn.Conv2d(8, hidden_channels, 3, padding=1),
+            nn.SiLU(),
+            nn.Conv2d(hidden_channels, hidden_channels, 3, padding=1),
+            nn.SiLU(),
+            nn.Conv2d(hidden_channels, 4, 3, padding=1),
+        )
+
+        # nn.init.zeros_(self.net[-1].weight)
+        # nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, mq_latent, lq_latent):
+        base = (1.0 - self.alpha) * mq_latent + self.alpha * lq_latent
+
+        delta = self.net(torch.cat([mq_latent, lq_latent], dim=1))
+
+        # delta 자체를 부드럽게 제한
+        delta = self.delta_bound * torch.tanh(delta / self.delta_bound)
+
+        fused = base + self.delta_scale * delta
+        return fused

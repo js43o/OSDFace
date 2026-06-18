@@ -31,10 +31,10 @@ def parse_args():
         default="Manojb/stable-diffusion-2-1-base",
     )
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--max_epoch", type=int, default=16)
-    parser.add_argument("--batch_size", type=int, default=3)
+    parser.add_argument("--max_epoch", type=int, default=5)
+    parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument(
-        "--lambda_adv", type=float, default=1e-2, help="Adversarial loss weight"
+        "--lambda_adv", type=float, default=2e-2, help="Adversarial loss weight"
     )
     parser.add_argument(
         "--lambda_id", type=float, default=1e-1, help="Identity loss weight"
@@ -59,7 +59,7 @@ def parse_args():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="experiments/00_osdface_try3",
+        default="experiments/00_osdface_adv_2e-2",
         help="Root directory for saving results",
     )
     parser.add_argument(
@@ -277,7 +277,8 @@ def main():
             restored_img = vae.decode(x_0_latent / vae.config.scaling_factor).sample
 
             # Identity Features
-            gt_feature = id_model(process_arcface_input(gt))
+            with torch.no_grad():
+                gt_feature = id_model(process_arcface_input(gt))
             restored_feature = id_model(process_arcface_input(restored_img))
             ID_TARGET = torch.ones((args.batch_size,), device=device)
 
