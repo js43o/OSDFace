@@ -12,7 +12,7 @@ class SDXLPartialDiscriminator(nn.Module):
             sdxl_unet_id,
             subfolder="unet",
             addition_embed_type="text_time",
-            torch_dtype=torch.float16 if "cuda" in str(device) else torch.float32,
+            torch_dtype=torch.float32,
         ).to(device)
 
         self.conv_in = full_unet.conv_in

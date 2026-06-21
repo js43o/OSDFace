@@ -302,8 +302,7 @@ if __name__ == "__main__":
         "--output_dir",
         "-o",
         type=str,
-        required=True,
-        default="outputs",
+        default=None,
         help="the directory to save the output",
     )
     parser.add_argument(
@@ -343,6 +342,15 @@ if __name__ == "__main__":
     args = parser.parse_args()
     mp.set_start_method("spawn", force=True)
 
+    if args.output_dir is None:
+        args.output_dir = "outputs/%s/%s" % (
+            args.ckpt_path.split("/")[1],
+            args.ckpt_path.split("/")[3],
+        )
+
+    print("📁 output_dir is set to %s" % args.output_dir)
+    os.makedirs(args.output_dir, exist_ok=True)
+
     seed = args.seed
     random.seed(seed)
     np.random.seed(seed)
@@ -353,7 +361,7 @@ if __name__ == "__main__":
     if args.merge_lora:
         # Unet = merge_Unet(args)
         pass
-    os.makedirs(args.output_dir, exist_ok=True)
+
     print(f'There are {len(glob.glob(f"{args.input_image}/*"))} images to process.')
 
     run_inference(args, Unet)
